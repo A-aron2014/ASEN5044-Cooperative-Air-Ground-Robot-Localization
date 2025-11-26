@@ -1,0 +1,248 @@
+import numpy as np
+from scipy.linalg import expm
+from scipy.integrate import solve_ivp
+import matplotlib.pyplot as plt
+np.set_printoptions(precision=3)
+
+#### PART I ####
+
+# Nominal System Parameters
+dt = 0.1 # s
+L = 0.5 # m
+
+theta_g = np.pi/2 # rad
+theta_a = -np.pi/2 # rad
+
+vg = 2 # m/s
+va = 12 # m/s
+
+phi_g = -np.pi/18 # rad
+omega_a = np.pi/25 # rad/s
+
+u_nominal = np.array([vg, phi_g, va, omega_a])
+x_nom = np.array([10, 0, np.pi/2, -60, 0, -np.pi/2])
+
+
+# 1
+# UGV Jacobians
+Ag = np.array([[0, 0, -vg * np.sin(theta_g)],
+              [0, 0, vg * np.cos(theta_g)],
+              [0, 0, 0]])
+Bg = np.array([[np.cos(theta_g), 0],
+              [np.sin(theta_g), 0],
+              [(1/L)*np.tan(phi_g), (vg/L)/np.cos(phi_g)**2]])
+
+# UAV Jacobians
+Aa = np.array([[0, 0, -va * np.sin(theta_a)],
+              [0, 0, va * np.cos(theta_a)],
+              [0, 0, 0]])
+Ba = np.array([[np.cos(theta_a), 0],
+              [np.sin(theta_a), 0],
+              [0, 1]])
+
+# Stack A and B Jacobians
+A = np.block([[Ag, np.zeros((3, 3))],
+              [np.zeros((3, 3)), Aa]])
+print("\nA:\n", A)
+B = np.block([[Bg, np.zeros((3, 2))],
+              [np.zeros((3, 2)), Ba]])
+print("\nB:\n", B)
+
+# 2
+# F matrix
+F = expm(A * dt)
+print("\nF:\n", F)
+
+# G matrix
+Ahat = np.block([[A, B],
+                 [np.zeros((4, 6)), np.zeros((4, 4))]])
+STM_Ahat = expm(Ahat * dt)
+G = STM_Ahat[0:6,6:10]
+print("\nG:\n", G)
+
+# H matrix
+d_eta = x_nom[4] - x_nom[1]
+d_xi = x_nom[3] - x_nom[0]
+r = np.hypot(d_xi, d_eta)
+r2 = r**2
+H = np.array([[d_eta/r2, -d_xi/r2, -1, -d_eta/r2, d_xi/r2, 0],
+              [-d_xi/r, -d_eta/r, 0, d_xi/r, d_eta/r, 0],
+              [d_eta/r2, -d_xi/r2, 0, -d_eta/r2, d_xi/r2, -1],
+              [0, 0, 0, 1, 0, 0],
+              [0, 0, 0, 0, 1, 0]])
+print("\nH:\n", H)
+
+# 3
+# given
+n = 1000 # timesteps "at least 400"
+x_nom = np.array([10, 0, np.pi/2, -60, 0, -np.pi/2])
+
+# "assume a reasonable initial state perturbation from the linearization point"
+dx0 = np.array([0, 1, 0,
+                0, 0, 0.1])  # used perturbations shown in solution sketch 
+
+### Non-Linear state simulation
+time = (0, n*dt)
+t = np.arange(0, (n+1)*dt, dt)
+
+# function for given non-linear equations of motion
+def eom_nonlinear(t, x, u, L):
+    
+    xi_g, eta_g, theta_g, xi_a, eta_a, theta_a = x
+    vg, phi_g, va, omega_a = u
+    
+    dxdt = np.array([vg*np.cos(theta_g), vg*np.sin(theta_g), (vg/L)*np.tan(phi_g),
+                     va*np.cos(theta_a), va*np.sin(theta_a), omega_a])
+    
+    return dxdt
+
+# function for given sensing model, y = h(x)
+def h_nonlinear(x):
+    
+    xi_g, eta_g, theta_g, xi_a, eta_a, theta_a = x
+    
+    y = np.array([np.arctan2(eta_a-eta_g,xi_a-xi_g)-theta_g,
+                 np.sqrt((xi_g-xi_a)**2+(eta_g-eta_a)**2),
+                 np.arctan2(eta_g-eta_a,xi_g-xi_a)-theta_a,
+                 xi_a,
+                 eta_a])
+    
+    return y
+
+x_nonlinear = np.zeros((n+1,6))
+x0_nonlinear = x_nom + dx0
+x_nonlinear[0,:] = x0_nonlinear
+y_nonlinear = np.zeros((n+1,5))
+
+# integrate using solve_ivp RK45 
+solve = solve_ivp(lambda t, x: eom_nonlinear(t, x, u_nominal, L),
+    time, x0_nonlinear, t_eval=t, method='RK45')
+
+x_nonlinear = solve.y.T
+for k in range(n+1):
+    y_nonlinear[k, :] = h_nonlinear(x_nonlinear[k, :])
+
+## Linear functions
+def A_ct(x, vg, va):
+    xi_g, eta_g, theta_g, xi_a, eta_a, theta_a = x
+    
+    #UGV
+    Ag = np.array([[0, 0, -vg * np.sin(theta_g)],
+              [0, 0, vg * np.cos(theta_g)],
+              [0, 0, 0]])
+    
+    # UAV
+    Aa = np.array([[0, 0, -va * np.sin(theta_a)],
+              [0, 0, va * np.cos(theta_a)],
+              [0, 0, 0]])
+    
+    # stack A Jacobians
+    A = np.block([[Ag, np.zeros((3, 3))],
+              [np.zeros((3, 3)), Aa]])
+    
+    return A
+    
+def H_jacobian(x):
+    
+    xi_g, eta_g, theta_g, xi_a, eta_a, theta_a = x
+    
+    d_eta = eta_a - eta_g
+    d_xi = xi_a - xi_g
+    r = np.hypot(d_xi, d_eta)
+    r2 = r**2
+    H = np.array([[d_eta/r2, -d_xi/r2, -1, -d_eta/r2, d_xi/r2, 0],
+              [-d_xi/r, -d_eta/r, 0, d_xi/r, d_eta/r, 0],
+              [d_eta/r2, -d_xi/r2, 0, -d_eta/r2, d_xi/r2, -1],
+              [0, 0, 0, 1, 0, 0],
+              [0, 0, 0, 0, 1, 0]])
+    
+    return H
+
+### Linear state simulation -- "key trick" from lect 24
+x0_nominal = x_nom
+
+solve_nom = solve_ivp(lambda t, x: eom_nonlinear(t, x, u_nominal, L),
+    time, x0_nominal, t_eval=t, method='RK45')
+
+x_nom_traj = solve_nom.y.T
+
+dx = np.zeros((n+1,6))
+dx[0,:] = dx0
+
+for k in range(n):
+    x_nom_k = x_nom_traj[k,:]
+    
+    # A matrix at time k
+    A_k = A_ct(x_nom_k, vg, va)
+    
+    # F matrix at time k
+    F_k = np.eye(6) + A_k * dt
+    
+    dx[k+1,:] = F_k @ dx[k, :]
+
+# construct linear states and measurments
+x_linear = x_nom_traj + dx
+y_linear = np.zeros((n+1,5))
+y_nom    = np.zeros((n+1, 5))
+
+for k in range(n+1):
+    x_nom_k = x_nom_traj[k, :]
+
+    y_nom_k = h_nonlinear(x_nom_k)  
+    H_k     = H_jacobian(x_nom_k)    
+
+    y_nom[k, :]    = y_nom_k
+    y_linear[k, :] = y_nom_k + H_k @ dx[k, :]
+
+    
+# State plots (linear and nonlinear vs time)
+ugv_labels = [r'xi_g [m]', r'eta_g [m]', r'theta_g [rad]']
+uav_labels = [r'xi_a [m]', r'eta_a [m]', r'theta_a [rad]']
+
+plt.figure(figsize=(12, 10))
+
+# UGV states -- left column
+for i in range(3):
+    plt.subplot(3, 2, 2*i + 1)   # positions 1,3,5
+    plt.plot(t, x_linear[:, i], 'r--', label='Linearized DT')
+    plt.plot(t, x_nonlinear[:, i], 'b',   label='Nonlinear')
+    plt.xlabel('Time [s]')
+    plt.ylabel(ugv_labels[i])
+    plt.title(f'UGV State: {ugv_labels[i]}')
+    plt.grid(True)
+    if i == 0:
+        plt.legend()
+
+#  UAV states -- right column
+for i in range(3):
+    plt.subplot(3, 2, 2*i + 2)   # positions 2,4,6
+    plt.plot(t, x_linear[:, i+3], 'r--', label='Linearized DT')
+    plt.plot(t, x_nonlinear[:, i+3], 'b',   label='Nonlinear')
+    plt.xlabel('Time [s]')
+    plt.ylabel(uav_labels[i])
+    plt.title(f'UAV State: {uav_labels[i]}')
+    plt.grid(True)
+    if i == 0:
+        plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+# # Measurement plots (linear and nonlinear vs time)
+# meas_labels = [r'bearing a->g',r'range',r'bearing g->a',
+#                r'UAV xi (GPS)',r'UAV eta (GPS)']
+# 
+# plt.figure(figsize=(12, 10))
+# 
+# for i in range(5):
+#     plt.subplot(3, 2, i+1)  # fill positions 1 through 5
+#     plt.plot(t, y_linear[:, i], 'r--', label='Linearized DT')
+#     plt.plot(t, y_nonlinear[:, i], 'b',   label='Nonlinear')
+#     plt.xlabel('Time [s]')
+#     plt.ylabel(meas_labels[i])
+#     plt.title(f'Measurement: {meas_labels[i]}')
+#     plt.grid(True)
+#     if i == 0:
+#         plt.legend()
+# plt.tight_layout()
+# plt.show()
