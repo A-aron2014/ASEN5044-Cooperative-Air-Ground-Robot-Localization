@@ -1,0 +1,191 @@
+\documentclass[conf]{new-aiaa}
+%\documentclass[journal]{new-aiaa} for journal papers
+\usepackage[utf8]{inputenc}
+
+\usepackage{listings}
+\usepackage{xcolor}
+
+% Define a style for code
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{gray!10},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!50!black},
+    stringstyle=\color{red}
+}
+\lstset{style=mystyle}
+
+\usepackage{float}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage[version=4]{mhchem}
+\usepackage{siunitx}
+\usepackage{longtable,tabularx}
+\usepackage[capitalise]{cleveref}
+\usepackage{nomencl}
+\usepackage{longtable}
+\usepackage{textcomp}
+\usepackage{listings}
+\usepackage{color} %red, green, blue, yellow, cyan, magenta, black, white
+\definecolor{mygreen}{RGB}{28,172,0} % color values Red, Green, Blue
+\definecolor{mylilas}{RGB}{170,55,241}
+\usepackage{matlab-prettifier}
+\usepackage{booktabs}
+\usepackage[subfigure]{tocloft} 
+\usepackage{subfig}
+\usepackage[labelfont=bf, textfont=bf, font=small]{caption}
+\usepackage{enumitem}
+\usepackage{lipsum}
+\usepackage{makecell}
+\usepackage{tocloft}
+\usepackage{subfig}
+\usepackage[section]{placeins}
+% Used for inserting MATLAB code into appendix
+\usepackage{listings}
+\usepackage{color}
+
+
+\definecolor{dkgreen}{rgb}{0,0.6,0}
+\definecolor{gray}{rgb}{0.5,0.5,0.5}
+\definecolor{mauve}{rgb}{0.58,0,0.82}
+\lstset{frame=tb,
+  language=Matlab,
+  aboveskip=3mm,
+  belowskip=3mm,
+  showstringspaces=false,
+  columns=flexible,
+  frame=L,
+  basicstyle={\small\ttfamily},
+  numbers=left, 
+  numbersep=10pt,  
+  numberstyle=\tiny\color{gray},
+  keywordstyle=\color{blue},
+  commentstyle=\color{dkgreen},
+  stringstyle=\color{mauve},
+  breaklines=true,
+  breakatwhitespace=true,
+  tabsize=3
+}
+\begin{document}
+\begin{titlepage}
+
+\newcommand{\HRule}{\rule{\linewidth}{0.48mm}}
+
+\center
+ 
+\textsc{\LARGE University of Colorado - Boulder}\\[1cm]
+\textsc{\Large Statistical Estimation of Dynamical Systems: ASEN5044}\\[0.5cm] % Major heading such as course name
+\textsc{\large 11/28/2025}\\[0.5cm] % Minor heading such as course title
+
+\HRule \\[0.4cm]
+{ \huge \bfseries Cooperative Air-Ground Robot Localization Progress Report 1}\\[0.4cm] 
+\HRule \\[0.75cm]
+
+\begin{minipage}{0.26\textwidth}
+\begin{flushleft} \large
+\emph{Author:}\\
+Aaron Pineda \textsc{aaron.pineda@colorado.edu}
+\end{flushleft}
+\begin{flushleft} \large
+\emph{Author:}\\
+Jeremy Aubert \textsc{jeremy.aubert@colorado.edu}
+\end{flushleft}
+\begin{flushleft} \large
+\emph{Author:}\\
+Landry Matthews \textsc{landry.matthews@colorado.edu}
+\end{flushleft}
+
+
+\end{minipage}
+\begin{minipage}{0.3\textwidth}
+\begin{flushright} \large
+\emph{Professor:} \\
+Professor \textsc{Khosro GhobadiFar} 
+\end{flushright}
+\end{minipage}\\[2cm]
+
+\includegraphics[width=0.65\textwidth]{watermark.png}\\
+ 
+\vfill
+
+\begin{abstract}
+
+\end{abstract}
+\end{titlepage}
+
+\section{Introduction}
+Accurate localization and navigation remain difficult for autonomous robots in environments where GPS is unreliable or compromised. Cooperative localization provides a way to improve robustness by allowing vehicles to share relative measurements with teammates. This project examines a system with a ground vehicle (UGV) and an aerial vehicle (UAV) that exchange relative measurements during an encounter. The UAV maintains GPS access, while the UGV relies on cooperative tracking. Although the broader framework supports decentralized estimation, this report focuses on developing a centralized estimator with nonlinear motion models as a baseline. The initial phase presented here implements both Linear and Extended Kalman filters to estimate the states of the two robots.
+
+\section{Part I: Deterministic System Analysis}
+
+\subsection{Linearizing the CT model}
+Given the initial equations of the system we found our CT jacobians, which are: \[
+A(x,u) =
+\begin{bmatrix}
+0 & 0 & -v_g \sin\theta_g & 0 & 0 & 0 \\
+0 & 0 & \phantom{-}v_g \cos\theta_g & 0 & 0 & 0 \\
+0 & 0 & 0 & 0 & 0 & 0 \\
+0 & 0 & 0 & 0 & 0 & -v_a \sin\theta_a \\
+0 & 0 & 0 & 0 & 0 & \phantom{-}v_a \cos\theta_a \\
+0 & 0 & 0 & 0 & 0 & 0
+\end{bmatrix}
+\],
+
+\[
+B(x,u) =
+\begin{bmatrix}
+\cos\theta_g & 0 & 0 & 0 \\
+\sin\theta_g & 0 & 0 & 0 \\
+\frac{1}{L}\tan\phi_g & \frac{v_g}{L}\sec^2\!\phi_g & 0 & 0 \\
+0 & 0 & \cos\theta_a & 0 \\
+0 & 0 & \sin\theta_a & 0 \\
+0 & 0 & 0 & 1
+\end{bmatrix}
+\]
+\[
+H(x) =
+\begin{bmatrix}
+\frac{\eta_a - \eta_g}{(\xi_a - \xi_g)^2 (1+\frac{\eta_a - \eta_g}{\xi_a - \xi_g})} & -\frac{1}{(\xi_a - \xi_g)(1+\frac{\eta_a - \eta_g}{\xi_a - \xi_g}} & -1 & -\frac{\eta_a - \eta_g}{(\xi_a - \xi_g)^2 (1+\frac{\eta_a - \eta_g}{\xi_a - \xi_g})} & \phantom{-}\frac{1}{(\xi_a - \xi_g) (1+\frac{\eta_a - \eta_g}{\xi_a - \xi_g})} & 0 \\[6pt]
+-\frac{2(\xi_a - \xi_g)}{\sqrt{(\xi_a - \xi_g)^2 + (\eta_a - \eta_g)^2)}} & -\frac{2(\eta_a - \eta_g)}{(\xi_a - \xi_g)^2 + (\eta_a - \eta_g)^2)} & 0 &\frac{2(\xi_a - \xi_g)}{(\xi_a - \xi_g)^2 + (\eta_a - \eta_g)^2)} & \frac{2(\eta_a - \eta_g)}{(\xi_a - \xi_g)^2 + (\eta_a - \eta_g)^2)} & 0 \\[6pt]
+-\frac{\eta_g - \eta_a}{\xi_g - \xi_a)^2 (1+\frac{\eta_g - \eta_a}{\xi_g - \xi_a})} & \frac{1}{\xi_g - \xi_a)(1+\frac{\eta_g - \eta_a}{\xi_g - \xi_a})} & 0 & \frac{\eta_g - \eta_a}{\xi_g - \xi_a)^2 (1+\frac{\eta_g - \eta_a}{\xi_g - \xi_a})} & \phantom{-}\frac{1}{\xi_g - \xi_a)(1+\frac{\eta_g - \eta_a}{\xi_g - \xi_a})} & -1 \\[6pt]
+0 & 0 & 0 & 1 & 0 & 0 \\[3pt]
+0 & 0 & 0 & 0 & 1 & 0
+\end{bmatrix}
+\]
+
+ however, because the system is time varying the jacobians change with every time step. Therefore our approach was to determine the CT dynamics of the system, \(\tilde{A}\), \(\tilde{B}\) and \(\tilde{C}\), then convert to DT dynamics using the Forward Euler method to find \(\tilde{F}\) and \(\tilde{G}\). \(\tilde{H}\) is obtained from linearizing the nonlinear measurement function \(h(x)\). In the linear case \(\tilde{H}\) reduces to\(\tilde{C}\) . The equations for \(\tilde{F}\) and \(\tilde{G}\) were derived in lecture to be \(\tilde{F} = I + \Delta t\tilde{A}\) and \(\tilde{G} = \Delta t\tilde{B}\). After converting the system to DT, we then linearized around a nominal trajectory at each time step. Since the nominal trajectory was different at each timestep of the system, the nonlinear equations needed to be integrated over the desired range of 100 seconds using solve IVP from the python library scipy. For this we used the initial nominal state condition that was provided of \(x_0 = [10, 0, \tfrac{\pi}{2}, -60, 0, -\tfrac{\pi}{2}]\). For each timestep the computed nominal trajectory was used to evaluate each of the state matrices and determine the future steps perturbation through the equation \( \delta x(k+1) \approx \tilde{F}_nom(k)\delta x(k)\). For this part contributions from noise and control inputs were ignored for perturbation vectors.
+
+\subsection{Simulating Linearized DT Dynamics}
+One thing to be noted is that the angles for the UGV and UAV had to be bounded within the specified limitations, and were bounded as such in the script to generate the correct plots.
+Firstly, the systems nonlinear dynamics were plotted against the estimated linearized dynamics. The initial perturbation used was \(x_0 = [0; 1; 0; 0; 0; 0.1]\) with nominal control inputs and no process or measurement noise in the simulation. The nonlinear states were generated from solve IVP for 100 seconds(1000 time steps) which was overlayed with the simulated linearized dynamics. Following this plot is the simulated measurement data and true measurement data, following finally with the perturbation dynamics.
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.6\textwidth]{Dynamics.png}
+    \caption{Modeled Dynamics.}
+    \label{fig:Modeled Dynamics vs Nonlinear Dynamics}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.6\textwidth]{Measurements.png}
+    \caption{Measurements.}
+    \label{fig:Simulated Data vs True Data}
+\end{figure}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.6\textwidth]{Perturbations.png}
+    \caption{Perturbation Dynamics.}
+    \label{fig:Simulated Perturbations}
+\end{figure}
+
+
+\section{Contributions}
+Each team member is individually working through the project to allow us to apply what we have learned and attempt to solidify our understanding of the course concepts. The code and images in this report come from Aaron's branch in the git repo.
+\url{https://github.com/A-aron2014/ASEN5044-Cooperative-Air-Ground-Robot-Localization}
+
+\end{document}
