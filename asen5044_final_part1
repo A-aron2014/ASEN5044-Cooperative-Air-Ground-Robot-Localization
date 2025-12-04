@@ -2,6 +2,7 @@ import numpy as np
 from scipy.linalg import expm
 from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
+import scipy.io as spio
 np.set_printoptions(precision=3)
 
 #### PART I ####
@@ -109,6 +110,7 @@ def h_nonlinear(x):
     
     return y
 
+
 x_nonlinear = np.zeros((n+1,6))
 x0_nonlinear = x_nom + dx0
 x_nonlinear[0,:] = x0_nonlinear
@@ -169,6 +171,9 @@ x_nom_traj = solve_nom.y.T
 dx = np.zeros((n+1,6))
 dx[0,:] = dx0
 
+F_list = []
+H_list = []
+
 for k in range(n):
     x_nom_k = x_nom_traj[k,:]
     
@@ -177,6 +182,7 @@ for k in range(n):
     
     # F matrix at time k
     F_k = np.eye(6) + A_k * dt
+    F_list.append(F_k)
     
     dx[k+1,:] = F_k @ dx[k, :]
 
@@ -189,44 +195,45 @@ for k in range(n+1):
     x_nom_k = x_nom_traj[k, :]
 
     y_nom_k = h_nonlinear(x_nom_k)  
-    H_k     = H_jacobian(x_nom_k)    
+    H_k     = H_jacobian(x_nom_k)
+    H_list.append(H_k)
 
     y_nom[k, :]    = y_nom_k
     y_linear[k, :] = y_nom_k + H_k @ dx[k, :]
 
     
-# State plots (linear and nonlinear vs time)
-ugv_labels = [r'xi_g [m]', r'eta_g [m]', r'theta_g [rad]']
-uav_labels = [r'xi_a [m]', r'eta_a [m]', r'theta_a [rad]']
-
-plt.figure(figsize=(12, 10))
-
-# UGV states -- left column
-for i in range(3):
-    plt.subplot(3, 2, 2*i + 1)   # positions 1,3,5
-    plt.plot(t, x_linear[:, i], 'r--', label='Linearized DT')
-    plt.plot(t, x_nonlinear[:, i], 'b',   label='Nonlinear')
-    plt.xlabel('Time [s]')
-    plt.ylabel(ugv_labels[i])
-    plt.title(f'UGV State: {ugv_labels[i]}')
-    plt.grid(True)
-    if i == 0:
-        plt.legend()
-
-#  UAV states -- right column
-for i in range(3):
-    plt.subplot(3, 2, 2*i + 2)   # positions 2,4,6
-    plt.plot(t, x_linear[:, i+3], 'r--', label='Linearized DT')
-    plt.plot(t, x_nonlinear[:, i+3], 'b',   label='Nonlinear')
-    plt.xlabel('Time [s]')
-    plt.ylabel(uav_labels[i])
-    plt.title(f'UAV State: {uav_labels[i]}')
-    plt.grid(True)
-    if i == 0:
-        plt.legend()
-
-plt.tight_layout()
-plt.show()
+# # State plots (linear and nonlinear vs time)
+# ugv_labels = [r'$\xi_g$ [m]', r'$\eta_g$ [m]', r'$\theta_g$ [rad]']
+# uav_labels = [r'$\xi_a$ [m]', r'$\eta_a$ [m]', r'$\theta_a$ [rad]']
+# 
+# plt.figure(figsize=(12, 10))
+# 
+# # UGV states -- left column
+# for i in range(3):
+#     plt.subplot(3, 2, 2*i + 1)   # positions 1,3,5
+#     plt.plot(t, x_linear[:, i], 'r--', label='Linearized DT')
+#     plt.plot(t, x_nonlinear[:, i], 'b',   label='Nonlinear')
+#     plt.xlabel('Time [s]')
+#     plt.ylabel(ugv_labels[i])
+#     plt.title(f'UGV State: {ugv_labels[i]}')
+#     plt.grid(True)
+#     if i == 0:
+#         plt.legend()
+# 
+# #  UAV states -- right column
+# for i in range(3):
+#     plt.subplot(3, 2, 2*i + 2)   # positions 2,4,6
+#     plt.plot(t, x_linear[:, i+3], 'r--', label='Linearized DT')
+#     plt.plot(t, x_nonlinear[:, i+3], 'b',   label='Nonlinear')
+#     plt.xlabel('Time [s]')
+#     plt.ylabel(uav_labels[i])
+#     plt.title(f'UAV State: {uav_labels[i]}')
+#     plt.grid(True)
+#     if i == 0:
+#         plt.legend()
+# 
+# plt.tight_layout()
+# plt.show()
 
 # # Measurement plots (linear and nonlinear vs time)
 # meas_labels = [r'bearing a->g',r'range',r'bearing g->a',
@@ -246,3 +253,220 @@ plt.show()
 #         plt.legend()
 # plt.tight_layout()
 # plt.show()
+
+
+#### PART II ####
+
+# ---- 4a -----#
+# load data
+data = spio.loadmat('cooplocalization_finalproj_KFdata.mat')
+Qtrue = data['Qtrue']     
+Rtrue = data['Rtrue']      
+ydata = data['ydata']      
+tvec  = data['tvec'].ravel()  
+measLabels = data['measLabels']
+
+rng = np.random.default_rng() # random number generator
+
+## Use these tuning blocks for NEES (Q_kf) and NIS (R_kf)
+# tune Q_kf with trial and error for NEES ## huge tune factor!
+Q_tune = 1000 # best 10000000
+Q_kf = Q_tune * Qtrue.copy()
+# tune R_kf with trial and error for NIS ## small tune factor is mo betta
+R_tune = 1
+R_kf = R_tune * Rtrue.copy()
+
+def single_mc_kf_sim(dx0, P0_plus):
+    
+    # truth state
+    x_truth = np.zeros((n+1, 6))
+    dx0_truth = rng.multivariate_normal(dx0, P0_plus)
+    x_truth[0,:] = x_nom_traj[0,:] + dx0_truth
+    
+    # noisy measurements
+    y_meas = np.zeros((n+1, 5)) 
+    
+    # truth trajectory and noisy measurements
+    for k in range(n):
+        xk = x_truth[k,:]
+        fk = eom_nonlinear(0, xk, u_nominal, L)
+        xn = xk + fk*dt
+        wk = rng.multivariate_normal(np.zeros(6), Qtrue)
+        vk = rng.multivariate_normal(np.zeros(5), Rtrue)
+        x_truth[k+1,:] = xn + wk
+        y_meas[k, :] = h_nonlinear(x_truth[k,:]) + vk
+    
+    vk_final = rng.multivariate_normal(np.zeros(5), Rtrue)
+    y_meas[-1, :] = h_nonlinear(x_truth[-1, :]) + vk_final
+    
+    # KF storage
+    dx_hat_list = np.zeros((n+1, 6))
+    P_list = np.zeros((n+1, 6, 6))
+    S_list = np.zeros((n+1, 5, 5))
+    y_diff_list = np.zeros((n+1, 5))
+    
+    dx_hat = dx0.copy()   
+    P = P0_plus.copy()
+    dx_hat_list[0, :] = dx_hat
+    P_list[0, :, :] = P
+    
+    for k in range(n):
+        
+        # KF meas update/correction 
+        H_k = H_list[k]
+        S_k  = H_k @ P @ H_k.T + R_kf
+        K_k = P @ H_k.T @ np.linalg.inv(S_k)
+        y_diff = y_meas[k] - (y_nom[k] + H_k @ dx_hat)
+        dx_hat = dx_hat + K_k @ y_diff
+        P = (np.eye(6) - K_k @ H_k) @ P
+        
+        # log the values at time k
+        P_list[k, :, :] = P
+        S_list[k,:,:] = S_k
+        y_diff_list[k] = y_diff
+        dx_hat_list[k, :] = dx_hat
+        
+        # KF time update/prediction 
+        F_k = F_list[k]
+        dx_hat = F_k @ dx_hat
+        P = F_k @ P @ F_k.T + Q_kf
+#         dx_hat_list[k,:] = dx_hat
+    
+    dx_hat_list[-1, :] = dx_hat
+    P_list[-1, :, :]   = P
+    
+    return x_truth, y_meas, dx_hat_list, P_list, y_diff_list, S_list
+        
+# KF prior mean and covariance      
+P0_plus  = np.diag([0.1, 0.1, 0.01, 0.1, 0.1, 0.01])
+x_true, y_meas, dx_hat_hist, P_hist, y_diff_hist, S_hist = single_mc_kf_sim(dx0, P0_plus)                    
+x_hat_full = x_nom_traj + dx_hat_hist
+
+# run a single measurement prediction
+y_hat = np.zeros((n+1, 5))
+for k in range(n+1):
+    y_hat[k,:] = H_list[k] @ dx_hat_hist[k,:] + y_nom[k,:]
+    
+# # State plots (one typical run)
+# ugv_labels = [r'$\xi_g$ [m]', r'$\eta_g$ [m]', r'$\theta_g$ [rad]']
+# uav_labels = [r'$\xi_a$ [m]', r'$\eta_a$ [m]', r'$\theta_a$ [rad]']
+# 
+# plt.figure(figsize=(12, 10))
+# 
+# # UGV states -- left column
+# for i in range(3):
+#     plt.subplot(3, 2, 2*i + 1)   # positions 1,3,5
+#     plt.plot(t, x_true[:, i], 'r', label='Ground Truth')
+#     plt.plot(t, x_hat_full[:, i], 'b', label='KF Estimate')
+#     plt.plot(t, x_nom_traj[:, i], 'g',   label='Noisy Simulated Data')
+#     plt.xlabel('Time [s]')
+#     plt.ylabel(ugv_labels[i])
+#     plt.grid(True)
+#     if i == 0:
+#         plt.legend()
+# 
+# #  UAV states -- right column
+# for i in range(3):
+#     plt.subplot(3, 2, 2*i + 2)   # positions 2,4,6
+#     plt.plot(t, x_true[:, i+3], 'r', label='Ground Truth')
+#     plt.plot(t, x_hat_full[:, i+3], 'b', label='KF Estimate')
+#     plt.plot(t, x_nom_traj[:, i+3], 'g',   label='Noisy Simulated Data')
+#     plt.xlabel('Time [s]')
+#     plt.ylabel(uav_labels[i])
+#     plt.grid(True)
+#     if i == 0:
+#         plt.legend()
+# 
+# plt.suptitle('Typical Sim Instance: Noisy Simulated Ground Truth vs  Noisy Simulated Data vs Linearized KF State Estimation Errors')
+# plt.tight_layout()
+# plt.show()
+
+# ---- 4b -----#
+from scipy.stats import chi2
+
+# NEES
+N_mc = 100 # number of mc simulations
+n_sv = 6 # number of state variables
+alpha = 0.05 # first choice like in lecture
+NEES = np.zeros((N_mc,n+1))
+
+for k in range(N_mc):
+    # first MC run
+    x_true, y_meas, dx_hat_hist, P_hist, y_diff_hist, S_hist = single_mc_kf_sim(dx0, P0_plus)
+    dx_true = x_true - x_nom_traj
+    
+    for j in range(n+1):
+        ex_k = dx_true[j,:] - dx_hat_hist[j,:] # state est error in dx
+        P_k = P_hist[j,:,:]
+        
+        # normalized estimation error squared (NEES) 
+        NEES[k,j] = ex_k.T @ np.linalg.inv(P_k) @ ex_k
+        
+# average the mc runs
+NEES_mean = np.mean(NEES, axis=0)
+
+# NEES Chi-square hypothesis test (lec 23, slide 16)
+df = N_mc * n_sv
+r1 = chi2.ppf(alpha/2, df=df) / N_mc
+r2 = chi2.ppf(1-(alpha/2), df=df) / N_mc
+print("NEES_mean first 5:", NEES_mean[:5])
+print("r1, r2:", r1, r2)
+
+# plot NEES
+plt.figure(figsize=(10, 7))
+### zoomed out plot (choose 1)
+# plt.plot(t[1:], NEES_mean[1:], 'k')
+### zoomed in plot (choose 1)
+plt.plot(t[1:100], NEES_mean[1:100], 'k')
+
+plt.hlines(r1, xmin=t[1], xmax=t[-1], colors='r', linestyles='--')
+plt.hlines(r2, xmin=t[1], xmax=t[-1], colors='g', linestyles='--')
+plt.title('NEES Test Statistic Points vs Time')
+plt.xlabel('Time [s]')
+plt.ylabel('NEES')
+plt.grid(True)
+plt.tight_layout()
+# plt.show()
+
+# ---- 4c -----#
+
+# NIS
+n_mv = 5 # number of measurement values
+NIS = np.zeros((N_mc, n+1))
+
+for k in range(N_mc):
+    # first MC run
+    x_true, y_meas, dx_hat_hist, P_hist, y_diff_hist, S_hist = single_mc_kf_sim(dx0, P0_plus)
+    
+    for j in range(n):
+        ey_k = y_diff_hist[j,:] 
+        S_k = S_hist[j,:,:]
+        
+        # normalized estimation error squared (NEES) 
+        NIS[k,j] = ey_k.T @ np.linalg.inv(S_k) @ ey_k
+        
+# average the mc runs
+NIS_mean = np.mean(NIS, axis=0)
+df_nis = N_mc * n_mv
+
+r1_nis = chi2.ppf(alpha/2,   df=df_nis) / N_mc
+r2_nis = chi2.ppf(1-(alpha/2), df=df_nis) / N_mc
+
+print("NIS_mean first 5:", NIS_mean[:5])
+print("r1_nis, r2_nis:", r1_nis, r2_nis)
+
+# plot NIS
+plt.figure(figsize=(10, 7))
+### zoomed out plot (choose 1)
+plt.plot(t[1:], NIS_mean[1:], 'k')
+### zoomed in plot (choose 1)
+# plt.plot(t[1:100], NIS_mean[1:100], 'k')
+
+plt.hlines(r1_nis, xmin=t[1], xmax=t[-1], colors='r', linestyles='--')
+plt.hlines(r2_nis, xmin=t[1], xmax=t[-1], colors='g', linestyles='--')
+plt.title('NIS Test Statistic Points vs Time')
+plt.xlabel('Time [s]')
+plt.ylabel('NIS')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
