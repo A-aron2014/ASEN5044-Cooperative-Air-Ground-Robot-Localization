@@ -157,7 +157,7 @@ H(x) =
 \end{bmatrix}
 \]
 
- however, because the system is time varying the jacobians change with every time step. Therefore our approach was to determine the CT dynamics of the system, \(\tilde{A}\), \(\tilde{B}\) and \(\tilde{C}\), then convert to DT dynamics using the Forward Euler method to find \(\tilde{F}\) and \(\tilde{G}\). \(\tilde{H}\) is obtained from linearizing the nonlinear measurement function \(h(x)\). In the linear case \(\tilde{H}\) reduces to\(\tilde{C}\) . The equations for \(\tilde{F}\) and \(\tilde{G}\) were derived in lecture to be \(\tilde{F} = I + \Delta t\tilde{A}\) and \(\tilde{G} = \Delta t\tilde{B}\). After converting the system to DT, we then linearized around a nominal trajectory at each time step. Since the nominal trajectory was different at each timestep of the system, the nonlinear equations needed to be integrated over the desired range of 100 seconds using solve IVP from the python library scipy. For this we used the initial nominal state condition that was provided of \(x_0 = [10, 0, \tfrac{\pi}{2}, -60, 0, -\tfrac{\pi}{2}]\). For each timestep the computed nominal trajectory was used to evaluate each of the state matrices and determine the future steps perturbation through the equation \( \delta x(k+1) \approx \tilde{F}_nom(k)\delta x(k)\). For this part contributions from noise and control inputs were ignored for perturbation vectors.
+ however, because the system is time varying the jacobians change with every time step. Therefore our approach was to determine the CT dynamics of the system, \(\tilde{A}\), \(\tilde{B}\) and \(\tilde{C}\), then convert to DT dynamics using the Forward Euler method to find \(\tilde{F}\) and \(\tilde{G}\). \(\tilde{H}\) is obtained from linearizing the nonlinear measurement function \(h(x)\). In the linear case \(\tilde{H}\) reduces to \(\tilde{C}\) . The equations for \(\tilde{F}\) and \(\tilde{G}\) were derived in lecture to be \(\tilde{F} = I + \Delta t\tilde{A}\) and \(\tilde{G} = \Delta t\tilde{B}\). After converting the system to DT, we then linearized around a nominal trajectory at each time step. Since the nominal trajectory was different at each timestep of the system, the nonlinear equations needed to be integrated over the desired range of 100 seconds using solve IVP from the python library scipy. For this we used the initial nominal state condition that was provided of \(x_0 = [10, 0, \tfrac{\pi}{2}, -60, 0, -\tfrac{\pi}{2}]\). For each timestep the computed nominal trajectory was used to evaluate each of the state matrices and determine the future steps perturbation through the equation \( \delta x(k+1) \approx \tilde{F}_nom(k)\delta x(k)\). For this part contributions from noise and control inputs were ignored for perturbation vectors.
 
 \subsection{Simulating Linearized DT Dynamics}
 One thing to be noted is that the angles for the UGV and UAV had to be bounded within the specified limitations, and were bounded as such in the script to generate the correct plots.
@@ -184,8 +184,96 @@ Firstly, the systems nonlinear dynamics were plotted against the estimated linea
 \end{figure}
 
 
+
+\section{Part II: Stochastic Nonlinear Filtering}
+
+\subsection{Implementation of a Linearized Kalman Filter}
+This section describes the steps taken to implement the DT linearized kalman filter for the cooperative localization of a UGV and UAV problem.  We start with the DT Jacobian matrices  \(\tilde{F}\), \(\tilde{G}\) and \(\tilde{H}\) derived in the previous section.  For our linearized filter we suppose that our nonlinear system stays relatively close to a nominal trajectory we will call \(x^*(t)\).  Importantly, for the linearized KF, we are estimating the perturbations from this nominal trajectory at each time step, not the full state.  For this model we assume zero process noise input.
+At each time step, the filter reconstructs the total state estimate by adding the nominal trajectory to the estimated perturbation using the following equation:
+\[ x_{k+1} \approx x^*_{k+1} + \delta x_{k+1} \]
+The linearized KF algorithm uses two major steps, the prediction step and the measurement update step
+Prediction dynamics steps:
+\[\delta x_{k+1}^- = \tilde{F}_k \delta x_k^+ + \tilde{G}_k \delta u_k\]
+\[P_{k+1}^- = \tilde{F}_k P_k^+ \tilde{F}_k^T + \tilde{\Omega}_k Q_k \tilde{\Omega}_k^T\]
+
+Measurement update equations:
+\[\delta x_{k+1}^+ = \delta x_{k+1}^- + K_{k+1}\left(\delta y_{k+1} - \tilde{H}_{k+1}\delta x_{k+1}^- \right)\]
+\[K_{k+1} = P_{k+1}^- \tilde{H}_{k+1}^{T} \left(\tilde{H}_{k+1} P_{k+1}^- \tilde{H}_{k+1}^{T} + R_{k+1}\right)^{-1}\]
+\[P_{k+1}^+ = \left(I - K_{k+1}\tilde{H}_{k+1}\right) P_{k+1}^-\]
+
+\subsection{Typical Simulation Instance (Part 4a)}
+Figure {fig:Simulated Data vs True Data} shows a single simulation instance of the states of the UGV and UAV.  We can see in every state that early in the simulation the KF estimate matches well with the truth model test (TMT), however at roughly the 10 second mark, the filter estimate diverges.  This is due to several factors mainly the accumulation of error and process noise.  In several of the plots the filter can be seen alternating between over and under-estimating the ground truth data.
+
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\textwidth]{part2_4a_plot.png}
+    \caption{Typical Simulation Instance}
+    \label{fig:Simulated Data vs True Data}
+\end{figure}
+
+\subsection{NEES Chi-Square Test (Part 4b)}
+There are two Chi-square hypothesis tests that we used to check if our KF's state errors and measurement residuals make sense for our models, NEES and NIS.  The Normalized Estimation Error Squared (NEES) test uses our TMT to assess validity of NEES at every time step over the monte carlo simulations.
+More explanation of NEES setup here.
+
+The NEES statistic used for Monte Carlo run $i$ is:
+\[\epsilon^{(i)}_{x,k} = e^{(i)}_{k}{}^{T}\, P_k^{-1}\, e^{(i)}_{k}\]
+
+The sample mean NEES over $N$ runs is:
+\[\bar{\epsilon}_{x,k} = \frac{1}{N} \sum_{i=1}^N \epsilon^{(i)}_{x,k}\]
+
+The chi-square consistency bounds are:
+\[r_1 = \frac{1}{N}\chi^2_{\alpha/2,\, N n_x}, 
+\qquad r_2 = \frac{1}{N}\chi^2_{1-\alpha/2,\, N n_x}\]
+
+
+$\bar{\varepsilon}_{x,k}$ should be in the interval $r_1 \le \bar{\varepsilon}_{x,k} \le r_2$ for $(1-\alpha)\times 100\%$ of the time.
+
+
+\begin{figure}[h]
+    \centering
+    \begin{minipage}{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{part2_4b_plot_zoomin.png}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{part2_4b_plot_zoomout.png}
+    \end{minipage}
+    \caption{NEES Test Statistic Points vs Time}
+    \label{fig:NEES}
+\end{figure}
+
+\subsection{NIS Chi-Square Test (Part 4c)}
+The Normalized Innovation Squared (NIS) test uses real (or simulated) sensor data to assess validity of NIS at every time step over the monte carlo simulations.
+The innovation statistic is:
+\[\epsilon_{y,k}^{(i)} =
+\delta y_k^{(i)T} S_k^{-1} \delta y_k^{(i)}\]
+with
+\[S_k = \tilde{H}_k\, P_k^-\, \tilde{H}_k^{T} + R_k\]
+
+The sample mean is:
+\[\bar{\epsilon}_{y,k} = \frac{1}{N} \sum_{i=1}^N epsilon^{(i)}_{y,k}\]
+
+With measurement dimension $m=5$, the chi-square bounds are:
+\[r^{NIS}_1 = \chi^2_{\alpha/2,\, m}\qquad
+r^{NIS}_2 = \chi^2_{1-\alpha/2,\, m}\]
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.6\textwidth]{part2_4c_plot.png}
+    \caption{NIS Test Statistic Points vs Time}
+    \label{fig:NIS}
+\end{figure}
+
+\subsection{Tuning the Linearized Kalman Filter}
+Tuning the linearized KF involved applying tuning factors to the Q and R covariance matrices. More to follow.
+
+
 \section{Contributions}
 Each team member is individually working through the project to allow us to apply what we have learned and attempt to solidify our understanding of the course concepts. The code and images in this report come from Aaron's branch in the git repo.
 \url{https://github.com/A-aron2014/ASEN5044-Cooperative-Air-Ground-Robot-Localization}
 
 \end{document}
+
