@@ -163,12 +163,19 @@ x0_nonlinear = x0 + x_init_perturb
 tspan = (0,T)
 x_estimated = np.zeros((time_steps,n))
 y_estimated = np.zeros((time_steps,num_measurements))
+y_nonlinear = np.zeros((time_steps,num_measurements))
 #use this to determine the perturbation dynamics for every timestep
 x_nominal_sln = solve_ivp(lambda t, x: define_eom(t,x,u_nom,L),tspan,x0, method='RK45', t_eval=t)
 x_nominal = x_nominal_sln.y.T
 
+#Integrating the nonlinear dynamic of the model
 nonlinear_x_sln = solve_ivp(lambda t, x: define_eom(t,x,u_nom,L),tspan,x0_nonlinear, method='RK45', t_eval=t)
 x_nonlinear = nonlinear_x_sln.y.T
+
+#integrating the nonlinear dynamics of the measurement model
+# nonlinear_y_sln = solve_ivp(lambda t, x: define_h(t,x),tspan,x0_nonlinear  ,method='RK45',t_eval=t)
+# y_nonlinear = nonlinear_y_sln.y.T
+
 Omega_dt = dt*Omega
 #initialize original y
 yk = np.zeros((time_steps+1,num_measurements))
@@ -189,7 +196,9 @@ for i in range(time_steps):
     # x_estimated[i] = F_dt@x_perturbation_vector[i,:] + G_dt@ u_nom
     # y_estimated[i] = H @ x_perturbation_vector[i,:] + define_h(x_nominal[i,:]) #Adding h(x_nominal to H~ calculation of the perturbation to get the next measurement)
     x_estimated[i] = x_nominal[i] + F_dt@delta_x[i]+ G_dt@ u_nom
-    y_estimated[i] = H @delta_x[i] + define_h(x_nominal[i,:]) #Adding h(x_nominal to H~ calculation of the perturbation to get the next measurement)
+    y_estimated[i] = define_h(x_nominal[i])
+    y_nonlinear[i] = define_h(x_nonlinear[i])
+    #y_estimated[i] = H @delta_x[i] + y_nonlinear[i] #define_h(x_nominal[i,:]) #Adding h(x_nominal to H~ calculation of the perturbation to get the next measurement)
 
 def wrap_angles(theta):
     return (theta + np.pi) %(2*np.pi) - np.pi
@@ -201,6 +210,7 @@ theta_g_bounded_nl = wrap_angles(x_nonlinear[:,2])
 theta_a_bounded_nl = wrap_angles(x_nonlinear[:,5])
 
 azimuth_bounded = wrap_angles(y_estimated[:,0])
+nonlinear_azimuth_bounded = wrap_angles(y_nonlinear[:,0])
 
 fig1,axs1 = plt.subplots(6,1, figsize=(10,10))
 
@@ -241,27 +251,31 @@ fig2,axs2 = plt.subplots(5,1, figsize=(10,10))
 # axs2[0,0].plot(tvector,ydata[:,0],label = "True")
 axs2[0].plot(tvector[:len(y_estimated)], azimuth_bounded, label="linearized")
 axs2[0].plot(tvector, ydata[0,:],'r--', label="True")
+axs2[0].plot(tvector[:len(y_nonlinear)], nonlinear_azimuth_bounded,'g--', label="Nonlinear Model")
 axs2[0].set_ylabel(r'$\text{bearing } a \to g$')
 axs2[0].set_xlabel('Time [s]')
 axs2[0].legend()
 axs2[1].plot(tvector[:len(y_estimated)],y_estimated[:,1],label = "linearized")
 axs2[1].plot(tvector,ydata[1,:],'r--', label = "True")
+axs2[1].plot(tvector[:len(y_nonlinear)], y_nonlinear[:,1],'g--', label="Nonlinear Model")
 axs2[1].set_ylabel(r'range')
 axs2[1].set_xlabel('Time [s]')
 axs2[1].legend()
 axs2[2].plot(tvector[:len(y_estimated)],y_estimated[:,2], label = "linearized")
 axs2[2].plot(tvector,ydata[2,:],'r--', label = "True")
+axs2[2].plot(tvector[:len(y_nonlinear)], y_nonlinear[:,2],'g--', label="Nonlinear Model")
 axs2[2].set_ylabel(r'$\text{bearing } g \to a$')
 axs2[2].set_xlabel('Time [s]')
 axs2[2].legend()
 axs2[3].plot(tvector[:len(y_estimated)],y_estimated[:,3], label = "linearized")
 axs2[3].plot(tvector,ydata[3,:],'r--', label = "True")
+axs2[3].plot(tvector[:len(y_nonlinear)], y_nonlinear[:,3],'g--', label="Nonlinear Model")
 axs2[3].set_ylabel(r'UAV $\xi$ (GPS)')
 axs2[3].set_xlabel('Time [s]')
 axs2[3].legend()
-
 axs2[4].plot(tvector[:len(y_estimated)],y_estimated[:,4], label = "linearized")
 axs2[4].plot(tvector,ydata[4,:],'r--', label = "True")
+axs2[4].plot(tvector[:len(y_nonlinear)], y_nonlinear[:,4],'g--', label="Nonlinear Model")
 axs2[4].set_ylabel(r'UAV $\eta$ (GPS)')
 axs2[4].set_xlabel('Time [s]')
 axs2[4].legend()
@@ -305,15 +319,50 @@ plt.show()
 #F~ = I + dt*A~evaluated at nominal trajectory
 #G~ = dt*B~ evaluated at nominal trajectory ->Does nominal trajectory change?
 #Omega~ = dt*Gamma
-#H~ = h?
+#H~ = h evaluated at the nominal trajectory
+
+def calc_F(A, dt):
+    F = np.eye(A.shape[0]) + A*dt
+    return F
+
+def calc_G(B,dt):
+    G = B*dt
+    return G
+def calc_Omega(Gamma,dt):
+    Omega = Gamma*dt
+    return Omega
 
 #x_perturb_dot = A~x_perturb + B~u_perturb + Gamma*w~
 #y_perturb_dot = C~*x_perturb + v
 
-#Compare results against full nonlinear simulation of system using solve_IVP
-def solve_the_nonlinear_model(system, init_conds):
-    pass
+'''
+Here I will put the LKF Code
+
+'''
 #NEES Epsilon bar statistics should approach expected value of chi square distribution which is n number of state variables as # of monte carlo sims goes to infinity
 
 #For NIS Should approach p number of observations
 #Mismodeling error in Q_kf if there is a huge error in process noise should be able to detect with 10-15 simulations but if you have a small error you need more simulations
+
+
+'''
+PART 5: THE EKF
+'''
+
+'''
+old settings json
+    "security.workspace.trust.untrustedFiles": "open",
+    "python.createEnvironment.trigger": "off",
+    "git.openRepositoryInParentFolders": "never",
+    "editor.hover.enabled": false,
+    "editor.parameterHints.enabled": true,
+    "editor.tabCompletion": "on",
+    "editor.quickSuggestions": {
+        "comments": "on",
+        "strings": "on"
+    }
+
+
+'''
+for k_ekf in range(time_steps):
+    x_nonlinear
