@@ -5,9 +5,8 @@ from scipy.integrate import solve_ivp
 from scipy.linalg import expm
 from scipy import linalg
 from scipy.stats.distributions import chi2
+from scipy.linalg import cho_factor, cho_solve
 import csv
-
-
 
 def update_A(x,u):
     xi_g, eta_g, theta_g, xi_a, eta_a, theta_a = x
@@ -268,9 +267,8 @@ def run_lkf():
 '''
 PART 5: THE EKF
 '''
-#No noise
+#Truth Run
 def run_ekf(ydata,tvector,Q,Gamma,R,x0):
-
 
     x_err = np.zeros((time_steps+1,n))
     sigma = np.zeros((time_steps+1,n))
@@ -460,121 +458,119 @@ def run_ekf(ydata,tvector,Q,Gamma,R,x0):
 
     return x_total_est, y_apriori, P_posteriori, epsilon
 
-def run_ekf_noisy(t_vector,Q,Gamma,R,x0,P0,time_steps,t):
-    #Total State update of X
+def ekf_truth(tvector,Q,Gamma,R, X0, P0, time_steps, dt, u_nom, L, rng):
+    x = np.zeros((time_steps+1, x0.size)); x[0] = x0
+    z = np.zeros((time_steps+1, R.shape[0]))
+    for k in range(time_steps):
+        w = np.random.multivariate_normal(np.zeros(Q.shape[0]), Q)
+        v = np.random.multivariate_normal(np.zeros(R.shape[0]), R)
 
-    x_truth = np.zeros((time_steps+1,n))#a posteriori state update
-    dx0 = rng.multivariate_normal(x0,P0)
-    #add error covariance value to initial state
-    x_truth[0,:] = x0 + dx0     
-    #initial Variable instantiation
-    x_err = np.zeros((time_steps+1,n))
-    sigma = np.zeros((time_steps+1,n))
+        sol_truth = solve_ivp(lambda t, x: define_eom(t, x, u_nom, L),
+                    (tvector[k], tvector[k+1]),
+                    x[k], method='RK45', t_eval=[tvector[k+1]])
+        
+        x[k+1] = sol_truth.y[:, -1] + w
+        z[k+1] = define_h(x[k+1]) + v
+    return x,z
+
+def run_ekf_noisy(tvector,x0,P0,x_truth,y_truth, Q_kf, Gamma, R_kf, time_steps, dt, u_nom, L):
+    #Total State update of X  
     x_estimated = np.zeros((time_steps+1,n))#linearized a priori x state
-
     P_posteriori = P0 #Updated Covariance
     P_apriori = P_posteriori.copy() #Prior Covariance
     x_apriori = np.zeros((time_steps+1,n))#prior estimate of x
 
     #noisy measurements
-    y_meas = np.zeros((time_steps+1,num_measurements))
     y_hat  = np.zeros((time_steps+1,num_measurements))
     innovations = np.zeros((time_steps+1,num_measurements))
-    epsilon = np.zeros(time_steps+1)
-
-    wk_all = rng.multivariate_normal(np.zeros(n), Q, size=time_steps+1)
-    vk_all = rng.multivariate_normal(np.zeros(num_measurements), R, size=time_steps+1)
-
-
-
     #KF Data to store 
     P_list = np.zeros((time_steps+1,n,n))
     S_list = np.zeros((time_steps+1,num_measurements,num_measurements))
-    y_diff_list = np.zeros((time_steps+1, num_measurements))
-  
+    sigma = np.zeros((time_steps+1,n))
+    e = np.zeros((time_steps+1,n)) 
     Omega = calc_Omega(Gamma,dt)
-    tspan = (0,T)
-    #Integrating the nonlinear dynamic of the model
-    # x_true_NL = solve_ivp(lambda t, x: define_eom(t,x,u_nom,L),tspan,x_truth[0], method='RK45', t_eval=t)
-    # x_true = x_true_NL.y.T
     P_list[0,:,:] = P0.copy()
 
+    # Consistency stats
+    nees = np.zeros(time_steps + 1)
+    nis  = np.zeros(time_steps + 1)
+    x_estimated[0] = x0
     for k in range(0,time_steps):
-        tspan_ekf = (tvector[k], tvector[k+1])
-        if not np.all(np.isfinite(x_truth[k])):
-            raise ValueError(f"Non-finite state at step {k}: {x_truth[k]}")
         #-------------------------------------------------------------------------------------------------------------------------------------------------
         #Prediction Step of the Filter
         #-------------------------------------------------------------------------------------------------------------------------------------------------
-        # Compute the "Nominal Trajectory" for timesteps k to k+1
-        # Truth propagation from x_truth
-        sol_truth = solve_ivp(lambda t, x: define_eom(t, x, u_nom, L),
-                            (tvector[k], tvector[k+1]),
-                            x_truth[k], method='RK45', t_eval=[tvector[k+1]])
-        x_truth[k+1] = sol_truth.y[:, -1] + wk_all[k]
-
         # Prediction propagation from previous estimate (or same sol if you intend)
         sol_pred = solve_ivp(lambda t, x: define_eom(t, x, u_nom, L),
                             (tvector[k], tvector[k+1]),
                             x_estimated[k], method='RK45', t_eval=[tvector[k+1]])
         x_apriori[k+1] = sol_pred.y[:, -1]
-
         #Verify that the calculated state is finite otherwise it will ruin the filter
         if not np.all(np.isfinite(x_apriori[k+1])):
             print(f"Warning: x_apriori at step {k+1} has NaN/inf: {x_apriori[k+1]}")
         #take compute the estimate version of this by taking the best guess and then plugging that into the euler form CT -> DT dynamios then sum them
         A = update_A(x_apriori[k+1],u_nom)
-        B = update_B(x_apriori[k+1],u_nom,L)
         #x_linearized = x_apriori[k] + dt * (A@x_apriori[k]+ B@ u_nom)
         F = calc_F(A,dt)
-        G = calc_G(B,dt)
+
         #calculate P_apriori
-        P_apriori = F @ P_list[k] @ F.T + Omega @ Q @ Omega.T
+        P_apriori = F @ P_list[k] @ F.T + Omega @ Q_kf @ Omega.T
+
         #----------------------------------------------------------------------------------------------------------------------------------------------------
         #Update Step of the Filter
         #----------------------------------------------------------------------------------------------------------------------------------------------------
-        #calculate y_meas by evalutating h using x_truth
-        y_meas[k+1] = define_h(x_truth[k+1]) + vk_all[k]
-        #calculate y_hat a priori by evaluating h using x_nonlinearx_apriori
+        #calculate y_hat a priori by evaluating h using x_apriori
         y_hat[k+1] = define_h(x_apriori[k+1])
-        #Build H using linear
+        #Build H
         H = update_H(x_apriori[k+1],u_nom)
         #calculate innovation
-        innovations[k+1] = y_meas[k+1] - y_hat[k+1]
+        innovations[k+1] = y_truth[k+1] - y_hat[k+1]
         #calculate K Kalman Gain Matrix
-        S = H @ P_apriori @ H.T + R
+        S = H @ P_apriori @ H.T + R_kf
         S_list[k+1] = S
         K_kf = np.linalg.solve(S, (P_apriori @ H.T).T).T#P_apriori @ H.T @ np.linalg.inv(S)
         #Calculate Updated total estimate
-        #x_truth[k+1] = x_apriori[k+1] + K_kf @ innovations[k+1]
         x_estimated[k+1] = x_apriori[k+1] + K_kf @ innovations[k+1]
         #Calculate Updated Covariance
         #P_posteriori = (np.eye(P_apriori.shape[0]) - K_kf @ H) @ P_apriori
         I = np.eye(P_apriori.shape[0])
-        P_posteriori = (I - K_kf @ H) @ P_apriori @ (I - K_kf @ H).T + K_kf @ R @ K_kf.T
+        P_posteriori = (I - K_kf @ H) @ P_apriori @ (I - K_kf @ H).T + K_kf @ R_kf @ K_kf.T
         P_list[k+1,:,:] = P_posteriori
         sigma[k] = np.sqrt(np.diag(P_posteriori))
-        x_err[k] = x_estimated[k] - x_truth[k]
-        epsilon[k] = x_err[k].T @ P_posteriori @ x_err[k]
+        #-------------------------------------------------------------------------------------------------------------------------------------------------------
+        #Consistency Stats
+        #-------------------------------------------------------------------------------------------------------------------------------------------------------
+        e[k+1] = x_truth[k+1] - x_estimated[k+1]
+        cS = cho_factor(S,lower=True)
+        cP = cho_factor(P_posteriori,lower = True)
+        nees[k+1] = e[k+1].T @ cho_solve(cP,e[k+1]) #np.linalg.inv(P_posteriori) @ e[k+1]
+        nis[k+1] = innovations[k+1].T @ cho_solve(cS,innovations[k+1]) #np.linalg.inv(S) @innovations[k+1]
+    return x_estimated, e, P_list, innovations, S_list, sigma, y_hat, nees, nis
 
-    # upper_bounds = 2*sigma
-    # lower_bounds = -2*sigma
-    #fig1,axs1 = plt.subplots(6,1, figsize=(10,10))
-    # theta_g_bounded = wrap_angles(x_truth[:,2])
-    # theta_a_bounded = wrap_angles(x_truth[:,5])
+def compute_nees(xs, xhat, P):
+    K = xs.shape[0] - 1
+    nees = np.zeros(K+1)
+    for k in range(K+1):
+        e = xs[k] - xhat[k]
+        cP = cho_factor(P[k])
+        nees[k] = e.T @ cho_solve(cP, e)
+    return nees
 
-    # theta_g_bounded_nl = wrap_angles(x_true[:,2])
-    # theta_a_bounded_nl = wrap_angles(x_true[:,5])
+def compute_nis(y_seq, S_seq):
+    K = y_seq.shape[0]
+    nis = np.zeros(K)
+    for k in range(K):
+        cS = cho_factor(S_seq[k])
+        nis[k] = y_seq[k].T @ cho_solve(cS, y_seq[k])
+    return nis
 
-    # azimuth_bounded = wrap_angles(y_hat[:,0])
-    # nonlinear_azimuth_bounded = wrap_angles(innovations[:,0])
-    #x_estimated = x_estimated.T.flatten()
- 
-    return x_truth, y_meas, x_estimated, x_err, P_list, innovations, S_list, sigma,y_hat
+def chi_bounds(dim, N, beta=0.95):
+    alpha = 1 - beta
+    low = chi2.ppf(alpha/2, df=dim * N) / N
+    high = chi2.ppf(1 - alpha/2, df=dim * N) / N
+    return low, high
 
 if __name__ == "__main__":
-    np.random.seed(100)
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(100)
     N = 100 # MonteCarlo Sim count
     n = 6 # number of state variables
     alpha = 0.05 # yields 95% confidence -> Significance level
@@ -657,9 +653,9 @@ if __name__ == "__main__":
     T = 100
     num_measurements = 5
     t = np.arange(0,t_steps,dt)
+    #TODO Uncomment Later
     #x_nonlinear, x_estimated, y_nonlinear, y_estimated =run_dynamics_model(time_steps,t)
-    qw= 100
-    Q_ekf = qw*Qtrue
+
         #Plot g.T @ g
     match TEST_STATE:
         case "LKF":
@@ -667,34 +663,48 @@ if __name__ == "__main__":
             pass
         case "EKF":
             #Run EKF SIM
-            #x_true, y_meas,x_est, epsilon_true, P_true,innovations,S_list = run_ekf(ydata, tvector,Qtrue,Gamma,Rtrue,x0,time_steps,t)
+            P0 =np.diag([0.1, 0.1, 0.01, 0.1, 0.1, 0.01])
+            #def ekf_truth(tvector,Q,Gamma,R, X0, P0, time_steps, dt, u_nom, L, rng):
+            x_truth, y_truth = ekf_truth(tvector,Qtrue,Gamma,Rtrue,x0,P0,time_steps,dt,u_nom,L,rng)
+
+            qw= 10
+            Q_ekf = qw*Qtrue
+
+            rw = 100
+            R_ekf = rw*Rtrue
             #Run the NEES Model
-            r1_nees = chi2.ppf(alpha/2, N*n)/N
-            r2_nees = chi2.ppf(1-alpha/2,N*n)/N
-            r1_nis = chi2.ppf(alpha/2, N*num_measurements)/N
-            r2_nis = chi2.ppf(1-alpha/2,N*num_measurements)/N
+            #r1_nees = chi2.ppf(alpha/2, N*n)/N
+            #r2_nees = chi2.ppf(1-alpha/2,N*n)/N
+
+            r1_nees,r2_nees = chi_bounds(n,N)
+            #r1_nis = chi2.ppf(alpha/2, N*num_measurements)/N
+            #r2_nis = chi2.ppf(1-alpha/2,N*num_measurements)/N
+            r1_nis,r2_nis = chi_bounds(num_measurements,N)
             NEES = np.zeros((N,time_steps+1))
             NIS = np.zeros((N,time_steps+1))
-            P0 =np.diag([0.1, 0.1, 0.01, 0.1, 0.1, 0.01])
+
             for k in range(N):
                 #First MC Run to generate truth value 
-                #x_truth, y_apriori, x_estimated, x_err, P_posteriori, y_diff_list, S_list
-                x_true, y_meas,x_est, epsilon_true, P_hist,innovations,S_list,sigma,y_hat = run_ekf_noisy(tvector,Q_ekf,Gamma,Rtrue,x0,P0,time_steps,t)
-                dx_true = x_true - x_est
-                for j in range(1,time_steps+1):
-                    #NEES calculations
-                    ex_k = dx_true[j,:] 
-                    Pk = P_hist[j,:,:]
-                    NEES[k,j] = ex_k @ np.linalg.inv(Pk) @ ex_k.T
+                #y_meas, x_estimated, e, P_list, innovations, S_list, sigma, y_hat, nees, nis # run_ekf_noisy(tvector,x0,P0,x_truth,y_truth, Q_kf, Gamma, R_kf, time_steps, dt, u_nom, L):
 
-                    #NIS Calculations
-                    ey_k = innovations[j,:]
-                    S_k = S_list[j,:,:]
-                    #NIS Calc
-                    NIS[k,j] = ey_k.T @np.linalg.inv(S_k)@ey_k
+                x_est, epsilon, P_hist,innovations,S_list,sigma,y_hat, nees, nis = run_ekf_noisy(tvector,x0,P0,x_truth,y_truth, Q_ekf,Gamma,Rtrue,time_steps,dt,u_nom,L)
 
+                # for j in range(1,time_steps+1):
+                #     #NEES calculations
+                #     ex_k = dx_true[j,:] 
+                #     Pk = P_hist[j,:,:]
+                #     NEES[k,j] = ex_k @ np.linalg.inv(Pk) @ ex_k.T
 
+                #     #NIS Calculations
+                #     ey_k = innovations[j,:]
+                #     S_k = S_list[j,:,:]
+                #     #NIS Calc
+                #     NIS[k,j] = ey_k.T @np.linalg.inv(S_k)@ey_k
+
+                NEES[k,:]=nees
+                NIS[k,:] = nis
             #Take the average of the NEES runs
+            print(NIS)
             NEES_mean = np.mean(NEES, axis=0)
 
             #Take the average of the NIS runs
@@ -722,120 +732,120 @@ if __name__ == "__main__":
             axs11.grid(True)
             fig11.tight_layout()
 
+            fig1,axs1 = plt.subplots(6,1, figsize=(10,10))
+            axs1[0].plot(t,x_est[:time_steps,0], label=r'$\xi_g$ Estimated')
+            axs1[0].plot(t,x_truth[:time_steps,0],'r--', label=r'$\xi_g$ True')
+            axs1[0].set_ylabel(r'$\xi_g$ [m]')
+            axs1[0].set_xlabel('Time [s]')
+            axs1[0].legend()
+            axs1[1].plot(t,x_est[:time_steps,1], label=r'$\eta_g$ Estimated')
+            axs1[1].plot(t,x_truth[:time_steps,1],'r--', label=r'$\eta_g$ True')
+            axs1[1].set_ylabel(r'$\eta_g$ [m]')
+            axs1[1].set_xlabel('Time [s]')
+            axs1[1].legend()
+            axs1[2].plot(t,x_est[:time_steps,2], label=r'$\theta_g$ Estimated')
+            axs1[2].plot(t,x_truth[:time_steps,2],'r--', label=r'$\theta_g$ True')
+            axs1[2].set_ylabel(r'$\theta_g$ [m]')
+            axs1[2].set_xlabel('Time [s]')
+            axs1[2].legend()
+            axs1[3].plot(t,x_est[:time_steps,3], label=r'$\xi_a$ Estimated')
+            axs1[3].plot(t,x_truth[:time_steps,3],'r--', label=r'$\xi_a$ True')
+            axs1[3].set_ylabel(r'$\xi_a$ [m]')
+            axs1[3].set_xlabel('Time [s]')
+            axs1[3].legend()
+            axs1[4].plot(t,x_est[:time_steps,4], label=r'$\eta_a$ Estimated')
+            axs1[4].plot(t,x_truth[:time_steps,4],'r--', label=r'$\eta_a$ True')
+            axs1[4].set_ylabel(r'$\eta_a$ [m]')
+            axs1[4].set_xlabel('Time [s]')
+            axs1[4].legend()
+            axs1[5].plot(t,x_est[:time_steps,5], label=r'$\theta_a$ Estimated')
+            axs1[5].plot(t,x_truth[:time_steps,5],'r--', label= r'$\theta_a$ True')
+            axs1[5].set_ylabel(r'$\theta_a$ [rad]')
+            axs1[5].set_xlabel('Time [s]')
+            axs1[5].legend()
+            fig1.suptitle("Estimated Noisy States Vs True Noisy Dynamics")
+            
+            fig2,axs2 = plt.subplots(5,1, figsize=(10,10))
+            axs2[0].plot(tvector[:len(y_hat)], y_hat[:,0], label=r'$\text{Azimuth} a \to g$ Estimated')
+            # axs2[0].plot(tvector, ydata[0,:],'r--', label="True")
+            axs2[0].plot(tvector, y_hat[:,0],'r--', label=r'$\text{Azimuth} a \to g$ True')
+            #axs2[0].plot(tvector[:len(y_nonlinear)], nonlinear_azimuth_bounded,'g--', label="Nonlinear Model")
+            axs2[0].set_ylabel(r'$\text{Azimuth} a \to g$')
+            axs2[0].set_xlabel('Time [s]')
+            axs2[0].legend()
+            axs2[1].plot(tvector[:len(y_hat)],y_hat[:,1],label = "Estimated")
+            # axs2[1].plot(tvector,ydata[1,:],'r--', label = "True")
+            axs2[1].plot(tvector,y_hat[:,1],'r--', label = "True")
+            #axs2[1].plot(tvector[:len(y_nonlinear)], y_nonlinear[:,1],'g--', label="Nonlinear Model")
+            axs2[1].set_ylabel(r'range')
+            axs2[1].set_xlabel('Time [s]')
+            axs2[1].legend()
+            axs2[2].plot(tvector[:len(y_hat)],y_hat[:,2], label = "Estimated")
+            # axs2[2].plot(tvector,ydata[2,:],'r--', label = "True")
+            axs2[2].plot(tvector,y_hat[:,2],'r--', label = "True")
+            #axs2[2].plot(tvector[:len(y_nonlinear)], y_nonlinear[:,2],'g--', label="Nonlinear Model")
+            axs2[2].set_ylabel(r'$\text{bearing } g \to a$')
+            axs2[2].set_xlabel('Time [s]')
+            axs2[2].legend()
+            axs2[3].plot(tvector[:len(y_hat)],y_hat[:,3], label = "Estimated")
+            # axs2[3].plot(tvector,ydata[3,:],'r--', label = "True")
+            axs2[3].plot(tvector,y_hat[:,3],'r--', label = "True")
+            #axs2[3].plot(tvector[:len(y_nonlinear)], y_nonlinear[:,3],'g--', label="Nonlinear Model")
+            axs2[3].set_ylabel(r'UAV $\xi$ (GPS)')
+            axs2[3].set_xlabel('Time [s]')
+            axs2[3].legend()
+            axs2[4].plot(tvector[:len(y_hat)],y_hat[:,4], label = "Estimated")
+            # axs2[4].plot(tvector,ydata[4,:],'r--', label = "True")
+            axs2[4].plot(tvector,y_hat[:,4],'r--', label = "True")
+            #axs2[4].plot(tvector[:len(y_nonlinear)], y_nonlinear[:,4],'g--', label="Nonlinear Model")
+            axs2[4].set_ylabel(r'UAV $\eta$ (GPS)')
+            axs2[4].set_xlabel('Time [s]')
+            axs2[4].legend()
+            fig2.suptitle("Approximate Linearized Model Data Vs True Measurement Data")
+
+            upper_bounds = 2*sigma
+            lower_bounds = -2*sigma
+            fig3,axs3 = plt.subplots(6,1, figsize=(10,10))
+            axs3[0].plot(t,epsilon[:time_steps,0], label="Error")
+            axs3[0].plot(t,upper_bounds[:time_steps,0],'r--', label="upper Bound")
+            axs3[0].plot(t,lower_bounds[:time_steps,0],'r--', label="Lower Bound")
+            axs3[0].set_ylabel(r'$\xi_g$ [m]')
+            axs3[0].set_xlabel('Time [s]')
+            axs3[0].legend()
+            axs3[1].plot(t,epsilon[:time_steps,1], label="Error")
+            axs3[1].plot(t,upper_bounds[:time_steps,1],'r--', label="upper Bound")
+            axs3[1].plot(t,lower_bounds[:time_steps,1],'r--', label="Lower Bound")
+            axs3[1].set_ylabel(r'$\eta_g$ [m]')
+            axs3[1].set_xlabel('Time [s]')
+            axs3[1].legend()
+            axs3[2].plot(t,epsilon[:time_steps,2], label="Error")
+            axs3[2].plot(t,upper_bounds[:time_steps,2],'r--', label="upper Bound")
+            axs3[2].plot(t,lower_bounds[:time_steps,2],'r--', label="Lower Bound")
+            axs3[2].set_ylabel(r'$\theta_g$ [m]')
+            axs3[2].set_xlabel('Time [s]')
+            axs3[2].legend()
+            axs3[3].plot(t,epsilon[:time_steps,3], label="Error")
+            axs3[3].plot(t,upper_bounds[:time_steps,3],'r--', label="upper Bound")
+            axs3[3].plot(t,lower_bounds[:time_steps,3],'r--', label="Lower Bound")
+            axs3[3].set_ylabel(r'$\xi_a$ [m]')
+            axs3[3].set_xlabel('Time [s]')
+            axs3[3].legend()
+            axs3[4].plot(t,epsilon[:time_steps,4], label="Error")
+            axs3[4].plot(t,upper_bounds[:time_steps,4],'r--', label="upper Bound")
+            axs3[4].plot(t,lower_bounds[:time_steps,4],'r--', label="Lower Bound")
+            axs3[4].set_ylabel(r'$\eta_a$ [m]')
+            axs3[4].set_xlabel('Time [s]')
+            axs3[4].legend()
+            axs3[5].plot(t,epsilon[:time_steps,5], label="Error")
+            axs3[5].plot(t,upper_bounds[:time_steps,5],'r--', label="upper Bound")
+            axs3[5].plot(t,lower_bounds[:time_steps,5],'r--', label="Lower Bound")
+            axs3[5].set_ylabel(r'$\theta_a$ [rad]')
+            axs3[5].set_xlabel('Time [s]')
+            axs3[5].legend()
+            fig3.suptitle("State Errors and 2Sigma Bounds")
+
             plt.show()
 
         case "UKF":
             #Run UKF SIM
             pass
-    fig1,axs1 = plt.subplots(6,1, figsize=(10,10))
-    axs1[0].plot(t,x_est[:time_steps,0], label="linearized")
-    axs1[0].plot(t,x_true[:time_steps,0],'r--', label="True")
-    axs1[0].set_ylabel(r'$\xi_g$ [m]')
-    axs1[0].set_xlabel('Time [s]')
-    axs1[0].legend()
-    axs1[1].plot(t,x_est[:time_steps,1], label="linearized")
-    axs1[1].plot(t,x_true[:time_steps,1],'r--', label="True")
-    axs1[1].set_ylabel(r'$\eta_g$ [m]')
-    axs1[1].set_xlabel('Time [s]')
-    axs1[1].legend()
-    axs1[2].plot(t,x_est[:time_steps,2], label="linearized")
-    axs1[2].plot(t,x_est[:time_steps,2],'r--', label="True")
-    axs1[2].set_ylabel(r'$\theta_g$ [m]')
-    axs1[2].set_xlabel('Time [s]')
-    axs1[2].legend()
-    axs1[3].plot(t,x_est[:time_steps,3], label="linearized")
-    axs1[3].plot(t,x_true[:time_steps,3],'r--', label="True")
-    axs1[3].set_ylabel(r'$\xi_a$ [m]')
-    axs1[3].set_xlabel('Time [s]')
-    axs1[3].legend()
-    axs1[4].plot(t,x_est[:time_steps,4], label="linearized")
-    axs1[4].plot(t,x_true[:time_steps,4],'r--', label="True")
-    axs1[4].set_ylabel(r'$\eta_a$ [m]')
-    axs1[4].set_xlabel('Time [s]')
-    axs1[4].legend()
-    axs1[5].plot(t,x_est[:time_steps,5], label="linearized")
-    axs1[5].plot(t,x_true[:time_steps,5],'r--', label="True")
-    axs1[5].set_ylabel(r'$\theta_a$ [rad]')
-    axs1[5].set_xlabel('Time [s]')
-    axs1[5].legend()
-    fig1.suptitle("Linearized States Vs Nonlinear Dynamics")
-    
-    fig2,axs2 = plt.subplots(5,1, figsize=(10,10))
-    axs2[0].plot(tvector[:len(y_meas)], y_meas[:,0], label="Estimated")
-    # axs2[0].plot(tvector, ydata[0,:],'r--', label="True")
-    axs2[0].plot(tvector, y_hat[:,0],'r--', label="True")
-    #axs2[0].plot(tvector[:len(y_nonlinear)], nonlinear_azimuth_bounded,'g--', label="Nonlinear Model")
-    axs2[0].set_ylabel(r'$\text{bearing } a \to g$')
-    axs2[0].set_xlabel('Time [s]')
-    axs2[0].legend()
-    axs2[1].plot(tvector[:len(y_meas)],y_meas[:,1],label = "Estimated")
-    # axs2[1].plot(tvector,ydata[1,:],'r--', label = "True")
-    axs2[1].plot(tvector,y_hat[:,1],'r--', label = "True")
-    #axs2[1].plot(tvector[:len(y_nonlinear)], y_nonlinear[:,1],'g--', label="Nonlinear Model")
-    axs2[1].set_ylabel(r'range')
-    axs2[1].set_xlabel('Time [s]')
-    axs2[1].legend()
-    axs2[2].plot(tvector[:len(y_meas)],y_meas[:,2], label = "Estimated")
-    # axs2[2].plot(tvector,ydata[2,:],'r--', label = "True")
-    axs2[2].plot(tvector,y_hat[:,2],'r--', label = "True")
-    #axs2[2].plot(tvector[:len(y_nonlinear)], y_nonlinear[:,2],'g--', label="Nonlinear Model")
-    axs2[2].set_ylabel(r'$\text{bearing } g \to a$')
-    axs2[2].set_xlabel('Time [s]')
-    axs2[2].legend()
-    axs2[3].plot(tvector[:len(y_meas)],y_meas[:,3], label = "Estimated")
-    # axs2[3].plot(tvector,ydata[3,:],'r--', label = "True")
-    axs2[3].plot(tvector,y_hat[:,3],'r--', label = "True")
-    #axs2[3].plot(tvector[:len(y_nonlinear)], y_nonlinear[:,3],'g--', label="Nonlinear Model")
-    axs2[3].set_ylabel(r'UAV $\xi$ (GPS)')
-    axs2[3].set_xlabel('Time [s]')
-    axs2[3].legend()
-    axs2[4].plot(tvector[:len(y_meas)],y_meas[:,4], label = "Estimated")
-    # axs2[4].plot(tvector,ydata[4,:],'r--', label = "True")
-    axs2[4].plot(tvector,y_hat[:,4],'r--', label = "True")
-    #axs2[4].plot(tvector[:len(y_nonlinear)], y_nonlinear[:,4],'g--', label="Nonlinear Model")
-    axs2[4].set_ylabel(r'UAV $\eta$ (GPS)')
-    axs2[4].set_xlabel('Time [s]')
-    axs2[4].legend()
-    fig2.suptitle("Approximate Linearized Model Data Vs True Measurement Data")
-
-
-    # fig3,axs3 = plt.subplots(6,1, figsize=(10,10))
-    # axs3[0].plot(t,x_err[:time_steps,0], label="linearized")
-    # axs3[0].plot(t,upper_bounds[:time_steps,0],'r--', label="True")
-    # axs3[0].plot(t,lower_bounds[:time_steps,0],'r--', label="True")
-    # axs3[0].set_ylabel(r'$\xi_g$ [m]')
-    # axs3[0].set_xlabel('Time [s]')
-    # axs3[0].legend()
-    # axs3[1].plot(t,x_err[:time_steps,1], label="linearized")
-    # axs3[1].plot(t,upper_bounds[:time_steps,1],'r--', label="True")
-    # axs3[1].plot(t,lower_bounds[:time_steps,1],'r--', label="True")
-    # axs3[1].set_ylabel(r'$\eta_g$ [m]')
-    # axs3[1].set_xlabel('Time [s]')
-    # axs3[1].legend()
-    # axs3[2].plot(t,x_err[:time_steps,2], label="linearized")
-    # axs3[2].plot(t,upper_bounds[:time_steps,2],'r--', label="True")
-    # axs3[2].plot(t,lower_bounds[:time_steps,2],'r--', label="True")
-    # axs3[2].set_ylabel(r'$\theta_g$ [m]')
-    # axs3[2].set_xlabel('Time [s]')
-    # axs3[2].legend()
-    # axs3[3].plot(t,x_err[:time_steps,3], label="linearized")
-    # axs3[3].plot(t,upper_bounds[:time_steps,3],'r--', label="True")
-    # axs3[3].plot(t,lower_bounds[:time_steps,3],'r--', label="True")
-    # axs3[3].set_ylabel(r'$\xi_a$ [m]')
-    # axs3[3].set_xlabel('Time [s]')
-    # axs3[3].legend()
-    # axs3[4].plot(t,x_err[:time_steps,4], label="linearized")
-    # axs3[4].plot(t,upper_bounds[:time_steps,4],'r--', label="True")
-    # axs3[4].plot(t,lower_bounds[:time_steps,4],'r--', label="True")
-    # axs3[4].set_ylabel(r'$\eta_a$ [m]')
-    # axs3[4].set_xlabel('Time [s]')
-    # axs3[4].legend()
-    # axs3[5].plot(t,x_err[:time_steps,5], label="linearized")
-    # axs3[5].plot(t,upper_bounds[:time_steps,5],'r--', label="True")
-    # axs3[5].plot(t,lower_bounds[:time_steps,5],'r--', label="True")
-    # axs3[5].set_ylabel(r'$\theta_a$ [rad]')
-    # axs3[5].set_xlabel('Time [s]')
-    # axs3[5].legend()
-    # fig3.suptitle("State Errors and 2Sigma Bounds")
-
-    plt.show()
