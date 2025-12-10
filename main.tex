@@ -1,7 +1,7 @@
 \documentclass[conf]{new-aiaa}
 %\documentclass[journal]{new-aiaa} for journal papers
 \usepackage[utf8]{inputenc}
-
+\usepackage{parskip}
 \usepackage{listings}
 \usepackage{xcolor}
 
@@ -71,6 +71,7 @@
   tabsize=3
 }
 \begin{document}
+\setlength{\parindent}{2em}
 \begin{titlepage}
 
 \newcommand{\HRule}{\rule{\linewidth}{0.48mm}}
@@ -118,12 +119,108 @@ Professor \textsc{Khosro GhobadiFar}
 \end{titlepage}
 
 \section{Introduction}
-Accurate localization and navigation remain difficult for autonomous robots in environments where GPS is unreliable or compromised. Cooperative localization provides a way to improve robustness by allowing vehicles to share relative measurements with teammates. This project examines a system with a ground vehicle (UGV) and an aerial vehicle (UAV) that exchange relative measurements during an encounter. The UAV maintains GPS access, while the UGV relies on cooperative tracking. Although the broader framework supports decentralized estimation, this report focuses on developing a centralized estimator with nonlinear motion models as a baseline. The initial phase presented here implements both Linear and Extended Kalman filters to estimate the states of the two robots.
+\vspace{1em} % adds extra space
+ Accurate and resilient localization remains a fundamental challenge for autonomous robotic systems operating in outdoor environments. While Global Positioning System (GPS) technology has become the standard solution for navigation, its reliability can be compromised in urban canyons, forested regions, mountainous terrain, or under intentional interference such as jamming and spoofing. These vulnerabilities highlight the need for complementary localization strategies that can sustain performance when GPS signals are degraded or unavailable.
 
-\section{Part I: Deterministic System Analysis}
+\par One promising approach is cooperative localization, in which multiple robots share relative measurements to improve their individual and collective state estimates. By leveraging peer-to-peer sensing and communication, robots can augment their own navigation solutions with information derived from nearby teammates. This paradigm is particularly relevant for heterogeneous teams, such as ground and aerial vehicles, where each platform has distinct sensing capabilities and environmental constraints. Cooperative localization not only enhances robustness but also enables multi-vehicle teams to operate effectively in GPS-denied environments.
+
+\par
+ This project investigates cooperative localization in a simplified two-dimensional scenario involving an unmanned ground vehicle (UGV) and an unmanned aerial vehicle (UAV). The UGV, modeled as a Dubins car with steering and velocity inputs, traverses the ground while tracking the UAV. The UAV, modeled as a Dubins unicycle with velocity and turn-rate inputs, flies a continuous trajectory overhead. During their encounter, the UAV maintains reliable GPS measurements, while the UGV relies solely on relative measurements to the UAV. A centralized estimator is assumed to fuse these measurements, providing a benchmark for evaluating decentralized algorithms. 
+
+\par
+ The focus of this work is the design, implementation, and validation of nonlinear stochastic filters; specifically a linearized Kalman filter (LKF) and an extended Kalman filter (EKF) to estimate the joint state of the UAV–UGV system. Monte Carlo truth-model testing, along with normalized estimation error squared (NEES) and normalized innovation squared (NIS) chi-square consistency tests, are employed to tune and assess filter performance. By analyzing estimation accuracy, statistical consistency, and robustness to noise, this project aims to demonstrate the feasibility of cooperative localization as a means of overcoming GPS limitations in multi-robot systems.
+
+\section{Deterministic System Analysis}
+\vspace{1em} % adds extra space
+\subsection{Defining the Physical Dynamical System}
+\vspace{1em} % adds extra space
+The cooperative localization scenario studied in this project involves a heterogeneous, non‑holonomic team composed of a ground robot and an aerial robot operating in a two‑dimensional plane. The ground platform is a four‑wheeled unmanned ground vehicle (UGV) modeled using Dubins‑car kinematics. Its motion is governed by steering and velocity inputs, reflecting the constraints of a car‑like vehicle. The aerial platform is a fixed‑wing unmanned aerial vehicle (UAV) modeled using Dubins‑unicycle kinematics. It follows a continuous trajectory at constant altitude above the UGV, with its motion controlled by forward velocity and turn rate inputs. Both vehicles are independently actuated, but their interaction arises through relative sensing.
+
+\par
+During their encounter, the vehicles exchange relative measurements. The UGV, which cannot rely on GPS in this scenario, disables its receiver and depends entirely on relative observations of the UAV. In contrast, the UAV maintains access to reliable GPS measurements throughout the encounter. This asymmetry reflects realistic operating conditions in which ground robots may experience degraded satellite coverage, while aerial robots retain line‑of‑sight to satellites.
+
+\par
+Although the system is designed to support decentralized cooperative localization, where each vehicle estimates both its own state and that of its teammate, the focus of this project is on a centralized estimator. In this configuration, a base station collects measurements from both the UGV and UAV and fuses them to estimate the combined system state. This centralized solution serves as a benchmark or “gold standard” against which decentralized algorithms can be evaluated. The models employed, as shown in Figure 1, are deliberately simplified yet nonlinear, capturing the essential kinematic behavior of each vehicle while enabling rigorous testing of stochastic filtering methods.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.6\textwidth]{Problem_Setup.png}
+    \caption{Modeled Dynamics.}
+    \label{fig:Modeled Dynamics vs Nonlinear Dynamics}
+\end{figure}
+
+\par
+As previously mentioned, the kinematics of the UGV are modeled as a simple steerable Dubins style 4-wheeled car. The cars wheelbase is defined by the variable L, and has an inertial frame defined by the East position \(\xi_g\) and the North position \(\eta_g\).  The UGV's control inputs are \(u_g = [v_g,\phi_g]^T\), where \(v_g\) (m\s) is the linear velocity and \(\phi_g\) (rad\s) is the angular rate of the car. The kinematics are defined by the nonlinear equations of motion below.
+
+\begin{align}
+\dot{\xi}_g &= v_g \cos \theta_g + \tilde{w}_{x,g}, \label{eq:ugv_x}\\
+\dot{\eta}_g &= v_g \sin \theta_g + \tilde{w}_{y,g}, \label{eq:ugv_y}\\
+\dot{\theta}_g &= \frac{v_g}{L} \tan \phi_g + \tilde{w}_{\omega,g}. \label{eq:ugv_theta}
+\end{align}
+
+\par
+The Fixed wing UAV kinematic model was styled after the Dubins Unicycle, which like the Dubins car is governed mainly by linear and angular velocity. The UAV's inertial frame is defined by the East position \(\xi_a\) and the North position \(eta_a\) and a heading of \(\theta_a\). The UAV's control inputs are given as \(u_a = [v_A,w_a]^T\), where \(v_a\)(m\s) is the system's linear velocity, and \(w_a\)(rad\s) is the systems angular velocity. The full kinematics are shown in the nonlinear equations of motion below.
+
+\begin{align}
+\dot{\xi}_a &= v_a \cos \theta_a + \tilde{w}_{x,a}, \label{eq:uav_x}\\
+\dot{\eta}_a &= v_a \sin \theta_a + \tilde{w}_{y,a}, \label{eq:uav_y}\\
+\dot{\theta}_a &= \omega_a + \tilde{w}_{\omega,a}. \label{eq:uav_theta}
+\end{align}
+
+\par
+The combined states of the system, as well as the control and disturbance inputs are: 
+
+\[
+x(t) =
+\begin{bmatrix}
+\xi_g \\ \eta_g \\ \theta_g \\ \xi_a \\ \eta_a \\ \theta_a
+\end{bmatrix},
+\quad
+u(t) =
+\begin{bmatrix}
+u_g \\ u_a
+\end{bmatrix},
+\quad
+\tilde{w}(t) =
+\begin{bmatrix}
+\tilde{w}_g \\ \tilde{w}_a
+\end{bmatrix}.
+\]
+
+where \(
+\tilde{w}_g(t) = [\tilde{w}_{x,g}, \tilde{w}_{y,g}, \tilde{w}_{\omega,g}]^T\) describes the process noise of the UGV states and \(\tilde{w}_a(t) = [\tilde{w}_{x,a}, \tilde{w}_{y,a}, \tilde{w}_{\omega,a}]^T\) describes the process noise of the UAV states.
+
+\par
+The sensing model \(h(t)\) for the system is given by noisy ranges and azimuth angles of the UGV relative to the UAV, noisy azimuth angles of the UAV relative to the UGV, and noisy UAV GPS measurements, \[
+y(t) =
+\begin{bmatrix}
+\tan^{-1}\!\left(\frac{\eta_a - \eta_g}{\xi_a - \xi_g}\right) - \theta_g \\[1ex]
+\sqrt{(\xi_g - \xi_a)^2 + (\eta_g - \eta_a)^2} \\[1ex]
+\tan^{-1}\!\left(\frac{\eta_g - \eta_a}{\xi_g - \xi_a}\right) - \theta_a \\[1ex]
+\xi_a \\[1ex]
+\eta_a
+\end{bmatrix}
++ \tilde{v}(t),
+\]
+
+where \(\tilde{v}(t)\) is the sensor measurement noise that is modeled as Additive White Gaussian Noise(AWGN).
 
 \subsection{Linearizing the CT model}
-Given the initial equations of the system we found our CT jacobians, which are: \[
+\vspace{1em} % adds extra space
+With the equations of motion laid out as well as the nominal system parameters listed below; 
+\begin{description}
+    \item[UGV wheelbase length:] $L = 0.5 \,\text{m}$
+    \item[UGV steering angle range:] $\phi_g \in \left[-\tfrac{5\pi}{12}, \tfrac{5\pi}{12}\right] \,\text{rad}$
+    \item[UGV maximum speed:] $v_{g,\max} = 3 \,\text{m/s}$
+    \item[UAV turn rate range:] $\omega_a \in \left[-\tfrac{\pi}{6}, \tfrac{\pi}{6}\right] \,\text{rad/s}$
+    \item[UAV velocity range:] $v_a \in [10, 20] \,\text{m/s}$
+    \item[Nominal UGV initial state:] $(\xi_g, \eta_g) = (10,0)$, $\theta_g = \tfrac{\pi}{2} \,\text{rad}$
+    \item[Nominal UGV trajectory:] $v_g = 2 \,\text{m/s}$, $\phi_g = -\tfrac{\pi}{18} \,\text{rad}$
+    \item[Nominal UAV initial state:] $(\xi_a, \eta_a) = (-60,0)$, $\theta_a = -\tfrac{\pi}{2} \,\text{rad}$
+    \item[Nominal UAV trajectory:] $v_a = 12 \,\text{m/s}$, $\omega_a = \tfrac{\pi}{25} \,\text{rad/s}$
+\end{description}
+
+We were able to then derive our CT jacobians. \[
 A(x,u) =
 \begin{bmatrix}
 0 & 0 & -v_g \sin\theta_g & 0 & 0 & 0 \\
@@ -157,11 +254,12 @@ H(x) =
 \end{bmatrix}
 \]
 
- however, because the system is time varying the jacobians change with every time step. Therefore our approach was to determine the CT dynamics of the system, \(\tilde{A}\), \(\tilde{B}\) and \(\tilde{C}\), then convert to DT dynamics using the Forward Euler method to find \(\tilde{F}\) and \(\tilde{G}\). \(\tilde{H}\) is obtained from linearizing the nonlinear measurement function \(h(x)\). In the linear case \(\tilde{H}\) reduces to \(\tilde{C}\) . The equations for \(\tilde{F}\) and \(\tilde{G}\) were derived in lecture to be \(\tilde{F} = I + \Delta t\tilde{A}\) and \(\tilde{G} = \Delta t\tilde{B}\). After converting the system to DT, we then linearized around a nominal trajectory at each time step. Since the nominal trajectory was different at each timestep of the system, the nonlinear equations needed to be integrated over the desired range of 100 seconds using solve IVP from the python library scipy. For this we used the initial nominal state condition that was provided of \(x_0 = [10, 0, \tfrac{\pi}{2}, -60, 0, -\tfrac{\pi}{2}]\). For each timestep the computed nominal trajectory was used to evaluate each of the state matrices and determine the future steps perturbation through the equation \( \delta x(k+1) \approx \tilde{F}_nom(k)\delta x(k)\). For this part contributions from noise and control inputs were ignored for perturbation vectors.
+ However, because the system is time varying the jacobians change with every time step. Because of this, our normal methods of determining stability and observability will not work here. Therefore we skipped that analysis in this report. Due to the system being LTV our approach was to determine the CT dynamics of the system, \(\tilde{A}\), \(\tilde{B}\) and \(\tilde{C}\), then convert to DT dynamics using the Forward Euler method to find \(\tilde{F}\) and \(\tilde{G}\). \(\tilde{H}\) is obtained from linearizing the nonlinear measurement function \(h(x)\). In the linear case \(\tilde{H}\) reduces to \(\tilde{C}\) . The equations for \(\tilde{F}\) and \(\tilde{G}\) were derived in lecture to be \(\tilde{F} = I + \Delta t\tilde{A}\) and \(\tilde{G} = \Delta t\tilde{B}\). After converting the system to DT, we then linearized around a nominal trajectory at each time step. Since the nominal trajectory was different at each timestep of the system, the nonlinear equations needed to be integrated over the desired range of 100 seconds using \(solve IVP\) from the python library scipy. For this we used the initial nominal state condition that was provided of \(x_0 = [10, 0, \tfrac{\pi}{2}, -60, 0, -\tfrac{\pi}{2}]\). For each timestep the computed nominal trajectory was used to evaluate each of the state matrices and determine the future steps perturbation through the equation \( \delta x(k+1) \approx \tilde{F}_{nom}(k)\delta x(k)\). For this part contributions from noise and control inputs were ignored for perturbation vectors.
 
 \subsection{Simulating Linearized DT Dynamics}
+\vspace{1em} % adds extra space
 One thing to be noted is that the angles for the UGV and UAV had to be bounded within the specified limitations, and were bounded as such in the script to generate the correct plots.
-Firstly, the systems nonlinear dynamics were plotted against the estimated linearized dynamics. The initial perturbation used was \(x_0 = [0; 1; 0; 0; 0; 0.1]\) with nominal control inputs and no process or measurement noise in the simulation. The nonlinear states were generated from solve IVP for 100 seconds(1000 time steps) which was overlayed with the simulated linearized dynamics. Following this plot is the simulated measurement data and true measurement data, following finally with the perturbation dynamics.
+Firstly, the systems nonlinear dynamics were plotted against the estimated linearized dynamics. The initial perturbation used was \(x_0 = [0; 1; 0; 0; 0; 0.1]\) with nominal control inputs and no process or measurement noise in the simulation. The nonlinear states were generated from Python's ODE integrator \(solve_IVP\) for 100 seconds(1000 time steps) which was overlayed with the simulated linearized dynamics. Following this plot is the simulated measurement data and true measurement data, following finally with the perturbation dynamics.
 \begin{figure}[h]
     \centering
     \includegraphics[width=0.6\textwidth]{Dynamics.png}
@@ -204,7 +302,9 @@ Measurement update steps:
 \[K_{k+1} = P_{k+1}^- \tilde{H}_{k+1}^{T} \left(\tilde{H}_{k+1} P_{k+1}^- \tilde{H}_{k+1}^{T} + R_{k+1}\right)^{-1}\]
 \[P_{k+1}^+ = \left(I - K_{k+1}\tilde{H}_{k+1}\right) P_{k+1}^-\]
 
-At each time step $k$, we evaluate the CT Jacobians of the dynamics and measurements along the nominal trajectory and construct the DT state transition matrix using the Eulerized approximation
+Notice that the prediction step introduces process noise $Q_{\text{k}}$ into the filter.  Similarly the measurment update step introduces the measurement noise covariance $R_{\text{k}}$ into the Kalman gain matrix.
+
+At each time step $k$, we evaluate the CT Jacobians of the dynamics and measurements along the nominal trajectory and construct the DT state transition matrix using the Eulerized approximation.
 \[\tilde{F}_k = I + \Delta t\,A_k\]
 This method is used instead of the previously used matrix exponential method  for finding $\tilde{F}_k$ in the linearized KF.
 Since the nominal control input is equal to the actual applied control, we get $\delta u_k = 0$, so for the prediction step, the perturbation dynamics simplify to \[\delta x_{k+1}^- = \tilde{F}_k \,\delta x_k^+\]
@@ -276,7 +376,7 @@ r^{NIS}_2 = \chi^2_{1-\alpha/2,\, m}\]
     \label{fig:NIS}
 \end{figure}
 
-In Figure~\ref{fig:NIS} we see that the 
+In Figure~\ref{fig:NIS} we see that the NIS statistics remain well above the upper bound for nearly the entire trajectory.  This indicates that the LKF is underestimating the measurement uncertainty.  The filter believes that the measurements are more reliable than they really are , so even small differences between predicted and actual measurements produce large NIS values.  This behavior is consistent with the observations of the NEES results.  Since the linearization is performed in reference to a nominal trajectory, it is inaccurate as soon as the true nonlinear trajectory diverges from that nominal trajectory.
 
 \subsection{Tuning the Linearized Kalman Filter}
 Tuning the linearized KF involved applying tuning factors to the Q and R covariance matrices. The process noise covariance $Q_{\text{KF}}$ and measurement noise covariance
@@ -296,6 +396,10 @@ $r_{\text{tune}}$ was decreased until the NIS approached the consistency interva
 In the final configuration used for the plots shown in this report, we used values of
 \[  q_{\text{tune}} = 20, \qquad r_{\text{tune}} = 1\]
 These compromised values were found to be the best available compromise after many attempts at tuning both NEES and NIS models.  The plots in Figure~\ref{fig:NEES} and Figure~\ref{fig:NIS} show that even with best-effort tuning of the Q and R matrices, the actual true system trajectory, \(\ x(t)\) deviates quickly from the nominal trajectory \(\ x^*\) causing large errors that become unrecoverable.  This behavior led to the need for an alternative method where we estimate total state and not just the perturbations.
+
+Because the LKF estimates perturbations about a nominal trajectory, any sustained drift between the true nonlinear trajectory and the nominal path causes a mismatch between the linearized model and the real dynamics. This linearization error accumulates in the state estimate, eventually dominating the stochastic noise terms and causing the filter to diverge.
+
+Overall, the LKF performs decently well only when the system remains close to the nominal trajectory and when the linear model provides an adequate local approximation. For this cooperative localization problem, the nonlinear geometric relationships and diverging trajectories result in rapid accumulation of linearization error, ultimately motivating the transition to an Extended Kalman Filter (EKF) that operates on the full nonlinear state, not perturbations.
 
 
 \section{Stochastic Nonlinear Filtering: Extended Kalman Filter (EKF)}
@@ -370,6 +474,7 @@ r^{NIS}_2 = \frac{1}{N}\chi^2_{1-\alpha/2,\,Nm}\]
 The EKF tuning procedure followed the recommendations in the lecture notes...
 
 \section{LKF and EKF Comparison}
+
 
 \section{Contributions}
 Each team member is individually working through the project to allow us to apply what we have learned and attempt to solidify our understanding of the course concepts. The code and images in this report come from Aaron's branch in the git repo.
