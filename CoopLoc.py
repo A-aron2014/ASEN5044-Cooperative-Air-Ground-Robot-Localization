@@ -5,7 +5,7 @@ from scipy.integrate import solve_ivp
 from scipy.linalg import expm
 from scipy import linalg
 from scipy.stats.distributions import chi2
-from scipy.linalg import cho_factor, cho_solve
+from scipy.linalg import cho_factor, cho_solve, cholesky
 import csv
 
 def update_A(x,u):
@@ -108,10 +108,6 @@ def run_dynamics_model(time_steps,t):
     #Integrating the nonlinear dynamic of the model
     nonlinear_x_sln = solve_ivp(lambda t, x: define_eom(t,x,u_nom,L),tspan,x0_nonlinear, method='RK45', t_eval=t)
     x_nonlinear = nonlinear_x_sln.y.T
-
-    #integrating the nonlinear dynamics of the measurement model
-    # nonlinear_y_sln = solve_ivp(lambda t, x: define_h(t,x),tspan,x0_nonlinear  ,method='RK45',t_eval=t)
-    # y_nonlinear = nonlinear_y_sln.y.T
 
     #initialize original y
     yk = np.zeros((time_steps+1,num_measurements))
@@ -252,11 +248,107 @@ def run_dynamics_model(time_steps,t):
 #y_perturb_dot = C~*x_perturb + v
 
 '''
-Here I will put the LKF Code
+LKF Functions
 
 '''
-def run_lkf():
-    pass
+
+def lkf_truth(tvector,Q,Gamma,R, X0, P0, time_steps, dt, u_nom, L, rng):
+    x = np.zeros((time_steps+1, x0.size)); x[0] = x0
+    z = np.zeros((time_steps+1, R.shape[0]))
+    Omega = calc_Omega(Gamma,dt)
+    for k in range(time_steps):
+        w = rng.multivariate_normal(np.zeros(Q.shape[0]), Q)
+        v = rng.multivariate_normal(np.zeros(R.shape[0]), R)
+
+
+        sol_truth = solve_ivp(lambda t, x: define_eom(t, x, u_nom, L),
+                    (tvector[k], tvector[k+1]),
+                    x[k], method='RK45', t_eval=[tvector[k+1]])
+        
+        x[k+1] = sol_truth.y[:, -1] + Omega @ w
+        z[k+1] = define_h(x[k+1]) + v
+    return x,z
+
+
+def run_lkf_noisy(tvector,x0,P0,x_init_perturb,x_truth,y_meas, Q_kf, Gamma, R_kf, time_steps,tspan, dt, u_nom, L):
+    #Total State update of X  
+    x_perturbation_vector = np.zeros((time_steps+1,n))
+    x_perturbation_vector[0] = x_init_perturb
+    x_estimated = np.zeros((time_steps+1,n))#linearized a priori x state
+    P_posteriori = P0 #Updated Covariance
+    P_apriori = P_posteriori.copy() #Prior Covariance
+    x_apriori = np.zeros((time_steps+1,n))#prior estimate of x
+    #Generate Nominal Trajectories
+    x_nominal_sln = solve_ivp(lambda t, x: define_eom(t,x,u_nom,L),tspan,x0, method='RK45', t_eval=t)
+    x_nominal = x_nominal_sln.y.T
+
+    #noisy measurements
+    y_hat  = np.zeros((time_steps+1,num_measurements))
+    y_nom = np.zeros((time_steps+1,num_measurements))
+    y_perturb = np.zeros((time_steps+1,num_measurements))
+    innovations = np.zeros((time_steps+1,num_measurements))
+    #KF Data to store 
+    P_list = np.zeros((time_steps+1,n,n))
+    S_list = np.zeros((time_steps+1,num_measurements,num_measurements))
+    sigma = np.zeros((time_steps+1,n))
+    e = np.zeros((time_steps+1,n)) 
+    Omega = calc_Omega(Gamma,dt)
+    P_list[0,:,:] = P0.copy()
+
+    # Consistency stats
+    nees = np.zeros(time_steps + 1)
+    nis  = np.zeros(time_steps + 1)
+    x_estimated[0] = x0
+
+    y_nom[0] = define_h(x_nominal[0])
+    for k in range(0,time_steps):
+        #-------------------------------------------------------------------------------------------------------------------------------------------------
+        #Prediction Step of the Filter
+        #-------------------------------------------------------------------------------------------------------------------------------------------------
+        #take compute the estimate version of this by taking the best guess and then plugging that into the euler form CT -> DT dynamios then sum them
+        A = update_A(x_nominal[k],u_nom)
+        B = update_B(x_nominal[k],u_nom,L)
+        F = calc_F(A,dt)
+
+        #Calculate x_perturb
+        delta_x_apriori = F @ x_perturbation_vector[k]  # Δx_{k+1|k}
+        #calculate P_apriori
+        P_apriori = F @ P_list[k] @ F.T + Omega @ Q_kf @ Omega.T
+        #----------------------------------------------------------------------------------------------------------------------------------------------------
+        #Update Step of the Filter
+        #----------------------------------------------------------------------------------------------------------------------------------------------------
+        #calculate y_hat a priori by evaluating h using x_apriori
+        y_nom[k+1] = define_h(x_nominal[k+1])
+        #Build H
+        H = update_H(x_nominal[k+1],u_nom)
+        #calculate innovation
+        y_perturb[k+1] = y_meas[k+1] - y_nom[k+1]
+        innovations[k+1] = y_perturb[k+1] - H @ delta_x_apriori
+        #calculate K Kalman Gain Matrix
+        S = H @ P_apriori @ H.T + R_kf
+        S_list[k+1] = S
+        K_kf = np.linalg.solve(S, (P_apriori @ H.T).T).T#P_apriori @ H.T @ np.linalg.inv(S)
+        #Calculate Updated total estimate
+        x_perturbation_vector[k+1] = delta_x_apriori + K_kf @ innovations[k+1]  # Δx_{k+1|k+1}
+        y_hat[k+1] = y_nom[k+1] + H @ x_perturbation_vector[k+1]
+        x_estimated[k+1] = x_nominal[k+1] + x_perturbation_vector[k+1]
+
+        #Calculate Updated Covariance
+        #P_posteriori = (np.eye(P_apriori.shape[0]) - K_kf @ H) @ P_apriori
+        I = np.eye(P_apriori.shape[0])
+        P_posteriori = (I - K_kf @ H) @ P_apriori @ (I - K_kf @ H).T + K_kf @ R_kf @ K_kf.T
+        P_list[k+1,:,:] = P_posteriori
+        sigma[k+1] = np.sqrt(np.diag(P_posteriori))
+        #-------------------------------------------------------------------------------------------------------------------------------------------------------
+        #Consistency Stats
+        #-------------------------------------------------------------------------------------------------------------------------------------------------------
+        e[k+1] = x_truth[k+1] - x_estimated[k+1]
+        cS = cho_factor(S,lower=True)
+        cP = cho_factor(P_posteriori,lower = True)
+        nees[k+1] = e[k+1].T @ cho_solve(cP,e[k+1]) #np.linalg.inv(P_posteriori) @ e[k+1]
+        nis[k+1] = innovations[k+1].T @ cho_solve(cS,innovations[k+1]) #np.linalg.inv(S) @innovations[k+1]
+
+    return x_estimated, e, P_list, innovations, S_list, sigma, y_hat, nees, nis
 
 #NEES Epsilon bar statistics should approach expected value of chi square distribution which is n number of state variables as # of monte carlo sims goes to infinity
 
@@ -462,8 +554,8 @@ def ekf_truth(tvector,Q,Gamma,R, X0, P0, time_steps, dt, u_nom, L, rng):
     x = np.zeros((time_steps+1, x0.size)); x[0] = x0
     z = np.zeros((time_steps+1, R.shape[0]))
     for k in range(time_steps):
-        w = np.random.multivariate_normal(np.zeros(Q.shape[0]), Q)
-        v = np.random.multivariate_normal(np.zeros(R.shape[0]), R)
+        w = rng.multivariate_normal(np.zeros(Q.shape[0]), Q)
+        v = rng.multivariate_normal(np.zeros(R.shape[0]), R)
 
         sol_truth = solve_ivp(lambda t, x: define_eom(t, x, u_nom, L),
                     (tvector[k], tvector[k+1]),
@@ -472,6 +564,7 @@ def ekf_truth(tvector,Q,Gamma,R, X0, P0, time_steps, dt, u_nom, L, rng):
         x[k+1] = sol_truth.y[:, -1] + w
         z[k+1] = define_h(x[k+1]) + v
     return x,z
+
 
 def run_ekf_noisy(tvector,x0,P0,x_truth,y_truth, Q_kf, Gamma, R_kf, time_steps, dt, u_nom, L):
     #Total State update of X  
@@ -568,6 +661,126 @@ def chi_bounds(dim, N, beta=0.95):
     low = chi2.ppf(alpha/2, df=dim * N) / N
     high = chi2.ppf(1 - alpha/2, df=dim * N) / N
     return low, high
+
+def run_ukf_noisy(tvector,x0,P0,x_truth,y_truth, Q_ukf, Gamma, R_ukf, time_steps, dt, u_nom, L,alpha, beta=2,kappa = 0):
+    #Total State update of X  
+    x_estimated = np.zeros((time_steps+1,n))#linearized a priori x state
+    P_posteriori = P0 #Updated Covariance
+    P_apriori = P_posteriori.copy() #Prior Covariance
+    x_apriori = np.zeros((time_steps+1,n))#prior estimate of x
+    lam = alpha**2 * (n + kappa) - n # This IS PROBABLY WRONG
+
+    #sigma Point setups
+    state_sigma_points = np.zeros((2*n+1, n))
+    meas_sigma_points = np.zeros((2*n+1, num_measurements))
+    ki = np.zeros((2*n+1, n))
+
+    P_xx = P_posteriori.copy()
+    P_xy = P_posteriori.copy()
+    mu = x0.copy()
+
+    w_m = np.zeros((1,2*n+1))
+    w_c = np.zeros((1,2*n+1))
+
+    #noisy measurements
+    y_hat  = np.zeros((time_steps+1,num_measurements))
+    innovations = np.zeros((time_steps+1,num_measurements))
+    #KF Data to store 
+    P_list = np.zeros((time_steps+1,n,n))
+    # S_list = np.zeros((time_steps+1,num_measurements,num_measurements))
+    S_predict = np.zeros((n,n))
+    S_meas = np.zeros((n,n))
+
+
+    sigma = np.zeros((time_steps+1,n))
+    e = np.zeros((time_steps+1,n)) 
+    Omega = calc_Omega(Gamma,dt)
+    P_list[0,:,:] = P0.copy()
+
+    # Consistency stats
+    nees = np.zeros(time_steps + 1)
+    nis  = np.zeros(time_steps + 1)
+    x_estimated[0] = x0
+
+    #define initial weights for sigma point reconstruction
+    w_m[0] = lam / (n+lam)
+    w_c[0] = lam/(n+lam) + 1 - alpha**2 + beta 
+
+    for k in range(0,time_steps):
+        #-------------------------------------------------------------------------------------------------------------------------------------------------
+        #Prediction Step of the Filter
+        #-------------------------------------------------------------------------------------------------------------------------------------------------
+        # Step 1 Generate all sigma poiont values
+        state_sigma_points[0] = x_estimated[k]
+        S_predict = cho_factor(P_apriori, lower = True)
+
+        mu = w_m[0] * state_sigma_points
+        for i in range(1,n+1):
+            state_sigma_points[i] = x_estimated[k] + np.sqrt(n+lam) * S_predict[i,:].T
+            state_sigma_points[n+i] = x_estimated[k] - np.sqrt(n+lam) * S_predict[i,:].T
+        for i in range(0,2*n+2):
+        #Step 2 Propagate each one through nonlinear dynamics
+            sol_pred_0 = solve_ivp(lambda t, x: define_eom(t, x, u_nom, L),
+                    (tvector[k], tvector[k+1]),
+                    state_sigma_points[k], method='RK45', t_eval=[tvector[k+1]])  
+
+            ki[i] = sol_pred_0.y[:, -1]
+        #Step 3 Recombine resultant sigma points to get predicted mean and covariance
+            w_m[i] = 1/(2*(n+lam))
+
+            mu += w_m[i] * ki[i]
+        for i in range(0,2*n + 2):
+            P_xx += w_c[i] * (ki[i] - mu) @ (ki[i] - mu).T + Q_ukf
+        
+        # Part 2 Measurement Update Step -> Do the same as befor but for measurements
+        #mu = X_hat_minus(k+1) and P_xx = P_minus(k+1)
+        meas_sigma_points[0] = mu
+        S_meas = cho_factor(P_xx,lower = True)
+
+        
+
+
+
+
+
+        #take compute the estimate version of this by taking the best guess and then plugging that into the euler form CT -> DT dynamios then sum them
+        A = update_A(x_apriori[k+1],u_nom)
+        #x_linearized = x_apriori[k] + dt * (A@x_apriori[k]+ B@ u_nom)
+        F = calc_F(A,dt)
+
+        #calculate P_apriori
+        P_apriori = F @ P_list[k] @ F.T + Omega @ Q_kf @ Omega.T
+
+        #----------------------------------------------------------------------------------------------------------------------------------------------------
+        #Update Step of the Filter
+        #----------------------------------------------------------------------------------------------------------------------------------------------------
+        #calculate y_hat a priori by evaluating h using x_apriori
+        y_hat[k+1] = define_h(x_apriori[k+1])
+        #Build H
+        H = update_H(x_apriori[k+1],u_nom)
+        #calculate innovation
+        innovations[k+1] = y_truth[k+1] - y_hat[k+1]
+        #calculate K Kalman Gain Matrix
+
+        K_kf = np.linalg.solve(S, (P_apriori @ H.T).T).T#P_apriori @ H.T @ np.linalg.inv(S)
+        #Calculate Updated total estimate
+        x_estimated[k+1] = x_apriori[k+1] + K_kf @ innovations[k+1]
+        #Calculate Updated Covariance
+        #P_posteriori = (np.eye(P_apriori.shape[0]) - K_kf @ H) @ P_apriori
+        I = np.eye(P_apriori.shape[0])
+        P_posteriori = (I - K_kf @ H) @ P_apriori @ (I - K_kf @ H).T + K_kf @ R_kf @ K_kf.T
+        P_list[k+1,:,:] = P_posteriori
+        sigma[k] = np.sqrt(np.diag(P_posteriori))
+        #-------------------------------------------------------------------------------------------------------------------------------------------------------
+        #Consistency Stats
+        #-------------------------------------------------------------------------------------------------------------------------------------------------------
+        e[k+1] = x_truth[k+1] - x_estimated[k+1]
+        cS = cho_factor(S,lower=True)
+        cP = cho_factor(P_posteriori,lower = True)
+        nees[k+1] = e[k+1].T @ cho_solve(cP,e[k+1]) #np.linalg.inv(P_posteriori) @ e[k+1]
+        nis[k+1] = innovations[k+1].T @ cho_solve(cS,innovations[k+1]) #np.linalg.inv(S) @innovations[k+1]
+    return x_estimated, e, P_list, innovations, S_list, sigma, y_hat, nees, nis
+
 
 if __name__ == "__main__":
     rng = np.random.default_rng(100)
@@ -684,29 +897,11 @@ if __name__ == "__main__":
             NIS = np.zeros((N,time_steps+1))
 
             for k in range(N):
-                #First MC Run to generate truth value 
-                #y_meas, x_estimated, e, P_list, innovations, S_list, sigma, y_hat, nees, nis # run_ekf_noisy(tvector,x0,P0,x_truth,y_truth, Q_kf, Gamma, R_kf, time_steps, dt, u_nom, L):
-
                 x_est, epsilon, P_hist,innovations,S_list,sigma,y_hat, nees, nis = run_ekf_noisy(tvector,x0,P0,x_truth,y_truth, Q_ekf,Gamma,Rtrue,time_steps,dt,u_nom,L)
-
-                # for j in range(1,time_steps+1):
-                #     #NEES calculations
-                #     ex_k = dx_true[j,:] 
-                #     Pk = P_hist[j,:,:]
-                #     NEES[k,j] = ex_k @ np.linalg.inv(Pk) @ ex_k.T
-
-                #     #NIS Calculations
-                #     ey_k = innovations[j,:]
-                #     S_k = S_list[j,:,:]
-                #     #NIS Calc
-                #     NIS[k,j] = ey_k.T @np.linalg.inv(S_k)@ey_k
-
                 NEES[k,:]=nees
                 NIS[k,:] = nis
             #Take the average of the NEES runs
-            print(NIS)
             NEES_mean = np.mean(NEES, axis=0)
-
             #Take the average of the NIS runs
             NIS_mean = np.mean(NIS, axis=0)
             #Run the NIS Test
